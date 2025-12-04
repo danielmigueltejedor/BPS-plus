@@ -184,3 +184,9 @@ Basado en:
 Proyecto no afiliado a Home Assistant.
 
 La precisión depende de la posición de los bluetooth_proxy, interferencias y estructura de la vivienda.
+
+## Licencia
+
+BPS-Plus es un fork del proyecto [BPS](https://github.com/Hogster/BPS) de Hogster, 
+licenciado bajo MIT.  
+Las modificaciones y extensiones de BPS-Plus están también bajo licencia MIT.
