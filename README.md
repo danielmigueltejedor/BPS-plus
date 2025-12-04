@@ -43,12 +43,7 @@ Permite localizar dispositivos Bluetooth en el **plano de tu casa**, determinar 
 
 ### 🔹 Opción 1 — HACS (Recomendada)
 
-1. Abre **HACS → Integrations**  
-2. Menú → **Custom repositories**
-3. Añade: `danielmigueltejedor/BPS-plus`
-4. Category → `Integration`
-5. Instala **BPS-plus**
-6. Reinicia Home Assistant
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=danielmigueltejedor&repository=BPS-plus&category=Integration)
 
 ---
 
