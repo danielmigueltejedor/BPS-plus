@@ -1,133 +1,191 @@
-# Notice
+# 📍 BLE Positioning System Plus (BPS-plus) for Home Assistant
 
-Actualmente esta integración depende de librerías científicas como **NumPy**, **SciPy** y **Shapely**.  
-En hardware ARM (Raspberry Pi, etc.) puede haber problemas al compilar SciPy si el sistema no es **64 bits** o el procesador es antiguo.
+![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=home-assistant)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Status](https://img.shields.io/badge/status-experimental-orange.svg)
+![GitHub](https://img.shields.io/badge/hosted%20on-GitHub-black?logo=github)
 
-- En **Raspberry Pi 5** o hardware similar (ARMv8 / 64 bits) con **Home Assistant OS de 64 bits** debería poder compilar correctamente.
-- Si consigues instalarlo en otros dispositivos ARM, abre un issue en el repositorio para documentarlo mejor.
+Integración **no oficial** para crear un sistema de **posicionamiento interior BLE** en **Home Assistant**.  
+Permite localizar dispositivos Bluetooth en el **plano de tu casa**, determinar **en qué planta** y **en qué zona** están, y usar esa información en automatizaciones inteligentes.
 
----
+> ⚠️ **Aviso sobre ARM / SciPy**  
+> Esta integración usa **NumPy / SciPy / Shapely**, que requieren compilación en ARM.  
+> En una **Raspberry Pi 5 con HAOS 64 bits** funciona correctamente.  
+> En ARM de 32 bits o hardware antiguo puede fallar la instalación.
 
-![BPS-plus Logo](img/icon.png)
-
-# BLE Positioning System Plus (BPS-plus)
-
-**BPS-plus** es un sistema de posicionamiento en interiores basado en Bluetooth Low Energy (BLE) para **Home Assistant**, que permite:
-
-- Ver en un mapa/plano de planta la posición de tus dispositivos BLE en tiempo (casi) real.
-- Saber en qué **planta** y en qué **zona/habitación** está cada dispositivo.
-- Usar esa información para **automatizar** tu casa en función de la presencia y localización precisa.
-
-Este proyecto es un fork evolucionado del trabajo original de [Hogster/BPS](https://github.com/Hogster/BPS) y se apoya inicialmente en la integración [Bermuda](https://github.com/agittins/bermuda) de [@agittins](https://github.com/agittins) para obtener distancias, pero con la intención de:
-
-> A medio plazo ser capaz de generar sus propios sensores de distancia y funcionar **sin depender de Bermuda**, usando directamente datos de `bluetooth_proxy` (ESPHome, Shelly, etc.).
-
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=danielmigueltejedor&repository=BPS-plus&category=Integration)
+> 🟡 Proyecto no afiliado a Home Assistant, ni a los autores originales de BPS/Bermuda.  
+> Uso personal y educativo.
 
 ---
 
-[![GitHub Release][releases-shield]][releases]
-[![GitHub Activity][commits-shield]][commits]
-[![License][license-shield]](LICENSE)
-[![hacs][hacsbadge]][hacs]
+## ✨ Características
+
+- Posicionamiento BLE mediante **trilateración** usando datos de `bluetooth_proxy`.
+- Distancias obtenidas inicialmente desde **Bermuda**.
+- Cálculo de:
+  - **Planta** del dispositivo.
+  - **Zona/habitación**.
+  - (Planificado) **Coordenadas X/Y** y calidad de señal.
+- Panel lateral para:
+  - Colocar receptores.
+  - Dibujar zonas.
+  - Ver movimiento en tiempo real.
+- Arquitectura moderna:
+  - `config_flow`
+  - `DataUpdateCoordinator`
+  - Entidades estables con `unique_id`
+- **Objetivo futuro:** independencia total de Bermuda calculando distancias internamente a partir de RSSI.
 
 ---
 
-## ¿Qué hace BPS-plus?
+## 🧩 Instalación
 
-BPS-plus combina tres piezas:
+### 🔹 Opción 1 — HACS (Recomendada)
 
-1. **Distancias a dispositivos BLE**  
-   Obtenidas inicialmente a través de **Bermuda** y dispositivos con `bluetooth_proxy` (ESPHome, Shelly Plus, etc.).
-
-2. **Trilateración en 2D**  
-   A partir de las distancias a varios puntos fijos (receptores BLE) calcula unas coordenadas (x, y) en el plano de tu casa.
-
-3. **Capas de lógica domótica**  
-   - Determina **en qué planta** se encuentra el dispositivo.
-   - Determina **en qué zona** (zona definida por ti: salón, cocina, despacho, etc.).
-   - Expone esta información a Home Assistant mediante sensores y, en el futuro, otras entidades (device_tracker, etc.).
-
-Con esto puedes, por ejemplo:
-
-- Encender luces al entrar en una habitación concreta llevando solo tu **Apple Watch** o móvil.
-- Cambiar la **temperatura** según la planta en la que estás.
-- Activar/desactivar modos de la casa en función de quién está y dónde (tú, tus padres, tus hermanas, etc.).
+1. Abre **HACS → Integrations**  
+2. Menú → **Custom repositories**
+3. Añade: `danielmigueltejedor/BPS-plus`
+4. Category → `Integration`
+5. Instala **BPS-plus**
+6. Reinicia Home Assistant
 
 ---
 
-## Estado actual del proyecto
+### 🔹 Opción 2 — Instalación manual
 
-BPS-plus está en fase de desarrollo activo y trae varias mejoras sobre la integración original:
+1. Descarga el repo:  
+   https://github.com/danielmigueltejedor/BPS-plus
+2. Copia los archivos en:
 
-- ✅ **Configuración vía UI** (config flow / options flow):  
-  - Parámetros internos sin editar archivos a mano.
-  - Futuro: configuración de URL/token de HA para el panel de tracking dinámico.
-- ✅ **Script JS generado dinámicamente desde Home Assistant** (planificado):  
-  - El panel de BPS-plus obtiene un `script.js` servido por la propia integración.
-  - No hace falta editar el JS para poner la URL o el token.
-- ✅ **Compatibilidad con HACS (Custom Repository)**  
-- 🔄 **Refactorización interna** para usar patrones modernos de Home Assistant:
-  - `DataUpdateCoordinator` para la lógica de actualización.
-  - `unique_id` estables para evitar recrear entidades.
-- 🧪 **Pruebas en hardware ARM** (Raspberry Pi 5 + HAOS 64 bits).
+```
+config/custom_components/bps
+```
 
-Próximos objetivos:
-
-- Desacoplar gradualmente la integración de **Bermuda**, de forma que BPS-plus pueda:
-  - Leer directamente RSSI y timestamps de `bluetooth_proxy`.
-  - Calcular distancias y trilateración sin depender de entidades externas.
-- Mejorar la **precisión y estabilidad** de los cálculos.
-- Añadir una **tarjeta Lovelace** específica para mostrar el mapa y los dispositivos.
+3. Reinicia Home Assistant
 
 ---
 
-## Requisitos
+### 🔹 Opción 3 — Terminal SSH
 
-Para usar BPS-plus en su estado actual necesitas:
+```
+mkdir -p /config/custom_components
+rm -rf /config/custom_components/bps
 
-- **Home Assistant** funcionando.
-- **HACS** instalado.
-- Integración **Bermuda** configurada y funcionando, con al menos un dispositivo BLE en seguimiento.
-- Al menos **tres dispositivos** que actúen como `bluetooth_proxy` (ESPHome o Shelly Plus, por ejemplo) repartidos en tu casa:
-  - Con menos de tres, no se puede hacer trilateración fiable.
-  - Cuantos más proxies y mejor distribuidos estén, mejor cobertura y precisión.
+cd /config
+git clone --depth=1 https://github.com/danielmigueltejedor/BPS-plus.git .bps-plus-tmp
+cp -r .bps-plus-tmp/custom_components/bps /config/custom_components/
 
-Recomendable:
+rm -rf /config/.bps-plus-tmp
+```
 
-- Varios **ESP32** repartidos por la casa (pasillos, habitaciones, salón, etc.).
-- En el caso de Raspberry Pi / ARM:
-  - Home Assistant OS de **64 bits**.
-  - Hardware moderno (p. ej. Raspberry Pi 5).
+Reinicia Home Assistant.
 
 ---
 
-## ¿Cómo funciona a alto nivel?
+## 🔄 Actualización
 
-1. Bermuda calcula una estimación de **distancia** desde cada proxy BLE hasta tus dispositivos (móvil, reloj, etc.).
-2. BPS-plus:
-   - Lee las distancias disponibles para cada dispositivo.
-   - Utiliza algoritmos de trilateración/aproximación con **SciPy / NumPy / Shapely**.
-   - Determina unas coordenadas en el plano.
-   - Proyecta esas coordenadas sobre:
-     - **Plantas** definidas por ti.
-     - **Zonas** rectangulares (en el futuro: formas más complejas).
-3. Finalmente BPS-plus expone:
-   - Sensores de **planta** por dispositivo.
-   - Sensores de **zona** por dispositivo.
-   - En el futuro:
-     - Sensores para X/Y.
-     - Entidades tipo `device_tracker` o similares.
-4. Un **panel de BPS-plus** en la barra lateral de Home Assistant muestra:
-   - Posición de los proxies.
-   - Diseño de zonas.
-   - Posición en tiempo real de los dispositivos.
+```
+rm -rf /config/custom_components/bps
+cd /config
+git clone --depth=1 https://github.com/danielmigueltejedor/BPS-plus.git .bps-plus-tmp
+cp -r .bps-plus-tmp/custom_components/bps /config/custom_components/
+rm -rf /config/.bps-plus-tmp
+```
+
+Reinicia Home Assistant.
 
 ---
 
-## Instalación con HACS
+## ⚙️ Configuración
 
-1. Asegúrate de tener **HACS** instalado en tu Home Assistant.
-2. En HACS, ve a **Integraciones**.
-3. Abre el menú de tres puntos en la esquina superior derecha y selecciona **Custom repositories**.
-4. En el campo *Repository* escribe:
+1. **Ajustes → Dispositivos y servicios → Añadir integración**
+2. Buscar: **BPS-plus**
+3. Seleccionar dispositivos BLE detectados por Bermuda
+4. Ajustar parámetros internos
+5. Guardar
+6. Aparecerán entidades + panel lateral
+
+---
+
+## 📊 Entidades creadas
+
+| Entidad | Descripción |
+|--------|-------------|
+| `sensor.bps_<device>_floor` | Planta detectada |
+| `sensor.bps_<device>_zone` | Zona/habitación |
+| `sensor.bps_<device>_x` *(planificado)* | Coordenada X |
+| `sensor.bps_<device>_y` *(planificado)* | Coordenada Y |
+| `sensor.bps_<device>_distance_error` | Error del cálculo |
+| `sensor.bps_<device>_last_update` | Última actualización |
+
+---
+
+## 🎯 Automatizaciones de ejemplo
+
+### Encender luz al entrar en la cocina
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: sensor.bps_apple_watch_daniel_zone
+    to: "Cocina"
+action:
+  - service: light.turn_on
+    target:
+      entity_id: light.cocina
+```
+
+### Luz suave si alguien sube a planta 1 por la noche
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: sensor.bps_padre_floor
+    to: "1"
+condition:
+  - condition: sun
+    after: sunset
+action:
+  - service: light.turn_on
+    data:
+      brightness: 20
+    target:
+      entity_id: light.pasillo_1
+```
+
+---
+
+## 🧠 Detalles técnicos
+
+- **Distancias:** proporcionadas por Bermuda  
+- **Cálculo:** trilateración con SciPy, ajuste y minimización de error  
+- **Zonas:** detección por geometría (Shapely)  
+- **Coordenadas:** sistema interno normalizado  
+- **Roadmap:**
+  - Sustituir Bermuda por cálculo propio desde RSSI
+  - Soporte para zonas poligonales
+  - Tarjeta Lovelace de seguimiento
+  - Exportar datos históricos de movimiento
+
+---
+
+## 🧑‍💻 Autor
+
+- **[@danielmigueltejedor](https://github.com/danielmigueltejedor)**  
+- Repositorio: https://github.com/danielmigueltejedor/BPS-plus  
+- Licencia: MIT  
+- Versión: 0.1.0
+
+---
+
+## ⚠️ Créditos y legal
+
+Basado en:
+
+- **Hogster/BPS**
+- **agittins/Bermuda**
+
+Proyecto no afiliado a Home Assistant.
+
+La precisión depende de la posición de los bluetooth_proxy, interferencias y estructura de la vivienda.
