@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-DOMAIN = "bps-plus"
+DOMAIN = "bps_plus"
 
 # Configuración expuesta en el config flow / options
 CONF_BASE_URL = "base_url"          # URL externa (Nabu Casa / Nginx / etc.)
