@@ -170,7 +170,7 @@ action:
 - **[@danielmigueltejedor](https://github.com/danielmigueltejedor)**  
 - Repositorio: https://github.com/danielmigueltejedor/BPS-plus  
 - Licencia: MIT  
-- Versión: 0.1.0
+- Versión: 1.0.0
 
 ---
 
