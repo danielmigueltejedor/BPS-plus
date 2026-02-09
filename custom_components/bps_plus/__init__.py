@@ -62,6 +62,19 @@ secToUpdate = 1
 apitricords = []
 
 
+def cache_discovery_data(
+    hass: HomeAssistant,
+    canonical_map: dict[str, dict[str, str]],
+    entity_options: list[dict[str, str]],
+    target_metadata: dict[str, dict[str, str]],
+) -> None:
+    """Cache BLE discovery data so other platforms (sensor) can consume it."""
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["distance_entity_map"] = canonical_map
+    hass.data[DOMAIN]["entity_options"] = entity_options
+    hass.data[DOMAIN]["target_metadata"] = target_metadata
+
+
 def normalize_mac(value: str | None) -> str | None:
     """Normalize MAC-like value to AA:BB:CC:DD:EE:FF."""
     if not value:
@@ -145,6 +158,10 @@ def discover_distance_entities(hass: HomeAssistant):
         canonical_target = canonical_target_token(raw_target, current_to_source)
         canonical_map.setdefault(canonical_target, {})[receiver] = state.entity_id
 
+    # Include known BLE devices even if no _distance_to_ sensor is active right now.
+    for target_id in target_metadata:
+        canonical_map.setdefault(target_id, {})
+
     entity_options = []
     for target_id in sorted(canonical_map):
         metadata = target_metadata.get(target_id, {})
@@ -223,7 +240,8 @@ async def update_tracked_entities(hass, jinja_code):
                 await asyncio.sleep(10)
                 continue  # Skip and start over
 
-            canonical_map, _, _ = discover_distance_entities(hass)
+            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
             new_global_data = [
                 {
                     "entity": ent,
@@ -755,6 +773,7 @@ class BPSReadAPIText(HomeAssistantView):
         maps_path = hass.config.path("www/bps_maps")
         bpsdata_file_path = Path(maps_path) / "bpsdata.txt"
         canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+        cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
         entities = [item["id"] for item in entity_options]
 
         try:

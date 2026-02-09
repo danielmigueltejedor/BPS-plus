@@ -1,102 +1,160 @@
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.core import callback
+from __future__ import annotations
+
 import logging
+from typing import Any
+
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.device_registry import DeviceInfo
+
+from .const import DOMAIN
+from .__init__ import discover_distance_entities, cache_discovery_data
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = "bps_sensors"
 
-def get_filtered_entities(hass):
-    """Fetch and filter sensors based on their entity_id"""
-    sensors = [state for state in hass.states.async_all() if state.entity_id.startswith("sensor.")]
-    filtered = [
-        state.entity_id.replace("sensor.", "").split("_distance_to_")[0]
-        for state in sensors
-        if "_distance_to_" in state.entity_id
-    ]
-    return list(set(filtered))
+def _get_cached_discovery(
+    hass: HomeAssistant,
+) -> tuple[dict[str, dict[str, str]], list[dict[str, str]], dict[str, dict[str, str]]]:
+    domain_data = hass.data.get(DOMAIN, {})
+    canonical_map = domain_data.get("distance_entity_map")
+    entity_options = domain_data.get("entity_options")
+    target_metadata = domain_data.get("target_metadata")
 
-class CustomDistanceSensor(SensorEntity):
-    """A representation of a custom sensor"""
-    def __init__(self, name, unique_id):
-        self._name = name
-        self._unique_id = unique_id
-        self._state = "unknown"
-    
+    if canonical_map is None or entity_options is None or target_metadata is None:
+        canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+        cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
+
+    return canonical_map, entity_options, target_metadata
+
+
+def _all_receivers(canonical_map: dict[str, dict[str, str]]) -> list[str]:
+    receivers = set()
+    for receiver_map in canonical_map.values():
+        receivers.update(receiver_map.keys())
+    return sorted(receivers)
+
+
+class BpsDistanceSensor(SensorEntity):
+    """Distance from one BLE target to one proxy (receiver), owned by BPS-Plus."""
+
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = "m"
+    _attr_should_poll = True
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        target_id: str,
+        receiver_id: str,
+        display_name: str,
+    ) -> None:
+        self.hass = hass
+        self._target_id = target_id
+        self._receiver_id = receiver_id
+        self._display_name = display_name
+        self._attr_unique_id = f"{DOMAIN}_distance_{target_id}_{receiver_id}"
+        self._attr_name = f"{display_name} distance to {receiver_id}"
+        self._attr_native_value = None
+        self._source_entity_id: str | None = None
+
     @property
-    def name(self):
-        return self._name
-    
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"target_{self._target_id}")},
+            name=self._display_name,
+            manufacturer="BPS-Plus",
+            model="BLE Target",
+        )
+
     @property
-    def unique_id(self):
-        return self._unique_id
-    
-    @property
-    def state(self):
-        return self._state
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "target_id": self._target_id,
+            "receiver_id": self._receiver_id,
+            "source_entity_id": self._source_entity_id,
+            "managed_by": DOMAIN,
+        }
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Set dynamic sensors based on the filtered entities"""
-    _LOGGER.info("async_setup_entry in sensor.py has been called")
-    
-    if "bps_sensors" not in hass.data:
-        hass.data["bps_sensors"] = {}
+    async def async_update(self) -> None:
+        canonical_map, _, _ = _get_cached_discovery(self.hass)
+        source = canonical_map.get(self._target_id, {}).get(self._receiver_id)
+        self._source_entity_id = source
 
-    entities = get_filtered_entities(hass)
-    _LOGGER.info(f"Creating sensors for entities: {entities}")
+        if not source:
+            self._attr_native_value = None
+            self._attr_available = False
+            return
 
-    existing_sensors = {state.entity_id for state in hass.states.async_all() if state.entity_id.startswith("sensor.")}
+        state = self.hass.states.get(source)
+        if state is None:
+            self._attr_native_value = None
+            self._attr_available = False
+            return
 
-    new_sensors = []
-    for entity in entities:
-        unique_zone_id = f"sensor.{entity}_bps_zone"
-        unique_zone_uid = f"bps_zone_{entity}"
-        unique_floor_id = f"sensor.{entity}_bps_floor"
-        unique_floor_uid = f"bps_floor_{entity}"
+        try:
+            self._attr_native_value = float(state.state)
+            self._attr_available = True
+        except (TypeError, ValueError):
+            self._attr_native_value = None
+            self._attr_available = False
 
-        if not any(s.startswith(unique_zone_id) for s in existing_sensors):
-            sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_uid)
-            hass.data["bps_sensors"][unique_zone_id] = sensor
-            new_sensors.append(sensor)
 
-        if not any(s.startswith(unique_floor_id) for s in existing_sensors):
-            sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_uid)
-            hass.data["bps_sensors"][unique_floor_id] = sensor
-            new_sensors.append(sensor)
-
-    if new_sensors:
-        async_add_entities(new_sensors, update_before_add=True)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up BPS-Plus managed sensors."""
+    _LOGGER.info("Setting up BPS-Plus distance sensors")
+    hass.data.setdefault(DOMAIN, {})
+    managed: dict[str, Entity] = hass.data[DOMAIN].setdefault("managed_sensors", {})
 
     @callback
-    def state_changed_listener(event):
-        """Listen for state changes to update dynamic sensors"""
-        new_entities = get_filtered_entities(hass)
-        new_sensors = []
+    def _ensure_entities() -> None:
+        canonical_map, entity_options, _ = _get_cached_discovery(hass)
+        receivers = _all_receivers(canonical_map)
+        if not receivers:
+            return
 
-        existing_sensors = {state.entity_id for state in hass.states.async_all() if state.entity_id.startswith("sensor.")}
+        target_name_map = {item["id"]: item.get("name") or item["id"] for item in entity_options}
 
-        for entity in new_entities:
-            unique_zone_id = f"sensor.{entity}_bps_zone"
-            unique_zone_uid = f"bps_zone_{entity}"
-            unique_floor_id = f"sensor.{entity}_bps_floor"
-            unique_floor_uid = f"bps_floor_{entity}"
+        new_entities: list[Entity] = []
+        for target_id in target_name_map:
+            for receiver_id in receivers:
+                key = f"{target_id}__{receiver_id}"
+                if key in managed:
+                    continue
+                sensor = BpsDistanceSensor(
+                    hass=hass,
+                    target_id=target_id,
+                    receiver_id=receiver_id,
+                    display_name=target_name_map[target_id],
+                )
+                managed[key] = sensor
+                new_entities.append(sensor)
 
-            if not any(s.startswith(unique_zone_id) for s in existing_sensors):
-                sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_uid)
-                hass.data["bps_sensors"][unique_zone_id] = sensor
-                new_sensors.append(sensor)
+        if new_entities:
+            async_add_entities(new_entities)
 
-            if not any(s.startswith(unique_floor_id) for s in existing_sensors):
-                sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_uid)
-                hass.data["bps_sensors"][unique_floor_id] = sensor
-                new_sensors.append(sensor)
+    _ensure_entities()
 
-        if new_sensors:
-            async_add_entities(new_sensors, update_before_add=True)
+    @callback
+    def _state_changed(event: Event) -> None:
+        entity_id = event.data.get("entity_id")
+        if not entity_id:
+            return
 
-    hass.bus.async_listen("state_changed", state_changed_listener)
+        new_state = event.data.get("new_state")
+        attrs = getattr(new_state, "attributes", {})
 
+        if "_distance_to_" in entity_id or attrs.get("source_type") == "bluetooth_le":
+            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
+            _ensure_entities()
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """If using configuration in configuration.yaml"""
-    await async_setup_entry(hass, config, async_add_entities)
+    unsub = hass.bus.async_listen(EVENT_STATE_CHANGED, _state_changed)
+    config_entry.async_on_unload(unsub)

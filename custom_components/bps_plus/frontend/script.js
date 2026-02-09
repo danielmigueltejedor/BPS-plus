@@ -124,7 +124,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return null;
             }
             const targetMap = distanceEntityMap[targetId] || {};
-            return targetMap[receiverId] || null;
+            const mapped = targetMap[receiverId];
+            if (mapped) {
+                return mapped;
+            }
+            // Legacy fallback for integrations that still expose the classic naming.
+            return `sensor.${targetId}_distance_to_${receiverId}`;
         }
 
         function refreshReceiverSuggestions() {
