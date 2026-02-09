@@ -1,6 +1,6 @@
 # 📍 BLE Positioning System Plus (BPS-plus) for Home Assistant
 
-![Version](https://img.shields.io/badge/version-1.3.5-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.1-blue.svg)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=home-assistant)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-experimental-orange.svg)
@@ -30,6 +30,7 @@ Permite localizar dispositivos Bluetooth en el **plano de tu casa**, determinar 
 - Panel lateral para:
   - Colocar receptores.
   - Dibujar zonas.
+  - Dibujar paredes rectas y ajustar penalización por pared.
   - Ver movimiento en tiempo real.
 - Arquitectura moderna:
   - `config_flow`
@@ -103,12 +104,25 @@ Reinicia Home Assistant.
 
 ### Calibración amigable (sin JSON)
 
-En el panel lateral, sección **Calibration**:
+En el panel lateral, sección **Calibración**:
 
 1. Selecciona un `receiver` y define `factor` + `offset` para calibración manual.
 2. Para calibración automática: elige dispositivo, escribe metros reales medidos y pulsa **Capture** varias veces.
 3. Pulsa **Auto Calibrate** para calcular ajuste automáticamente.
 4. Guarda el plano para persistir cambios.
+
+### Precisión por paredes
+
+- Puedes dibujar paredes en el plano (2 clics por pared).
+- El motor de trilateración cuenta cuántas paredes cruza la línea entre posición estimada y cada proxy.
+- Se aplica una **penalización por pared** (en metros) configurable por planta para mejorar el ajuste cuando hay habitaciones separadas o cajas metálicas.
+- Incluye presets rápidos recomendados:
+  - Sin pared / abierto: `0.8`
+  - Tabique ligero: `1.6`
+  - Tabique estándar: `2.5`
+  - Ladrillo: `3.4`
+  - Muro/hormigón: `4.5`
+  - Muro + caja metálica: `6.0`
 
 ### Detección automática BLE
 
@@ -186,7 +200,7 @@ action:
 - **[@danielmigueltejedor](https://github.com/danielmigueltejedor)**  
 - Repositorio: https://github.com/danielmigueltejedor/BPS-plus  
 - Licencia: MIT  
-- Versión: 1.3.5
+- Versión: 1.5.1
 
 ---
 

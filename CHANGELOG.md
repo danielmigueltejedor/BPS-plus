@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.1] - 2026-02-09
+- Added wall-penalty presets in UI for faster setup:
+  - open space, light partition, standard partition, brick, concrete, concrete+metal.
+- Hardened frontend data safety:
+  - fixed receiver duplicate checks to use actual payload ids,
+  - prevented saving receivers with invalid coordinates,
+  - guarded save flow to validate scale from the currently selected floor,
+  - kept floor-delete flow working without false scale validation errors.
+- Improved wall-penalty UX:
+  - preset selector syncs with manual penalty value when loading/saving floors.
+
+## [1.5.0] - 2026-02-09
+- Added wall-aware trilateration model:
+  - per-floor `walls` support with line segments,
+  - per-floor `wall_penalty` (meters),
+  - optimization now adds wall-crossing penalty to distance residuals.
+- Added wall editing in frontend:
+  - new **Dibujar pared** tool (2-click segment creation),
+  - wall list with delete action,
+  - persisted wall data in floor config.
+- Added per-floor wall-penalty controls in calibration panel.
+- Translated main frontend UI to Spanish (labels, calibration flow, tracking actions and key alerts).
+
 ## [1.3.5] - 2026-02-09
 - Added additional anti-loop hardening in BLE discovery:
   - ignores all entities owned by `bps_plus` via entity registry platform lookup,

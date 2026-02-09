@@ -30,6 +30,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const calCaptureSampleButton = document.getElementById('calCaptureSample');
     const calComputeAutoButton = document.getElementById('calComputeAuto');
     const calStatus = document.getElementById('calStatus');
+    const wallPenaltyInput = document.getElementById('wallPenalty');
+    const wallPenaltySaveButton = document.getElementById('wallPenaltySave');
+    const wallPenaltyPresetSelect = document.getElementById('wallPenaltyPreset');
     const saveButton = document.createElement('button');
 
     //Delete button
@@ -38,13 +41,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     deleteButton.style = 'background-color: red';
     deleteButton.innerHTML = `
         <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-save w-4 h-4 mr-2" data-component-name="Save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"></path><path d="M7 3v4a1 1 0 0 0 1 1h7"></path></svg>
-            Delete Floor
+            Eliminar planta
         `;
 
     const mapname = document.getElementById('mapname');
     const starttrackbtn = document.getElementById('starttrack');
     const stoptrackbtn = document.getElementById('stoptrack');
     const drawAreaButton = document.createElement('button');
+    const drawWallButton = document.createElement('button');
     const addDeviceButton = document.createElement('button');
     const clearCanvasButton = document.createElement('button');
     const saveReceiverButton = document.createElement('button');
@@ -70,6 +74,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     let distanceEntityMap = {};
     let targetMetadata = {};
     let discoveredReceivers = [];
+    let wallStartPoint = null;
+    const wallPenaltyPresets = [0.8, 1.6, 2.5, 3.4, 4.5, 6.0];
 
     const newelement = `
                 <ul class="space-y-2" id="idxxx">
@@ -92,12 +98,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             const mapsResponse = await fetch('/api/bps/maps');
             if (!mapsResponse.ok) {
                 console.error('Failed to fetch maps:', mapsResponse.statusText);
-                alert('Could not load maps.');
+                alert('No se pudieron cargar los mapas.');
                 return false;
             }
         
             const maps = await mapsResponse.json();
-            mapSelector.innerHTML = '<option value="">--Please choose an option--</option>';
+            mapSelector.innerHTML = '<option value="">--Selecciona una opción--</option>';
             maps.forEach(map => {
                 const option = document.createElement('option');
                 option.value = map;
@@ -150,26 +156,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         function startTracking() {
             if (!checkCanvasImage()) return;
             if (!mapname.value) {
-                alert("Please add or select a floor!");
+                alert("Selecciona o crea una planta.");
                 return;
             }
             if (socket){
-                alert("Already active connection");
+                alert("Ya hay una conexión activa.");
                 return;
             }
 
             if (!hass_token || !hassURL){
                 let messageStr = "";
                 if (!hass_token){
-                    messageStr = "You have to add a long-lived token";
+                    messageStr = "Debes añadir un token de larga duración";
                 }
                 if (!hass_token && !hassURL){
-                    messageStr = messageStr+" and the hassURL. Please read the instructions!";
+                    messageStr = messageStr+" y la URL de HA. Revisa la documentación.";
                     alert(messageStr);
                     return;
                 }
                 if (!hassURL){
-                    messageStr = "You have to add the hassURL";
+                    messageStr = "Debes añadir la URL de HA";
                 }
                 alert(messageStr);
                 return;
@@ -177,13 +183,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             
             //Build the array with tracked devices
             if (device == ""){
-                alert("You must choose a device to track!");
+                alert("Debes elegir un dispositivo para seguir.");
                 return;
             }
             tracked.length = 0;
             let floor = getCurrentFloor();
             if (!floor) {
-                alert("Select a valid floor before starting tracking.");
+                alert("Selecciona una planta válida antes de iniciar el seguimiento.");
                 return;
             }
             floor.receivers.forEach((entity, index) => {
@@ -195,7 +201,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Check if there are enough points for trilateration
             if (tracked.length < 3) {
-                alert("At least three beacons are required for tracking.");
+                alert("Se requieren al menos tres receptores para el seguimiento.");
                 return;
             }
     
@@ -264,11 +270,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         function stopTracking(){
             if (!checkCanvasImage()) return;
             if (!mapname.value) {
-                alert("Please enter a floor name!");
+                alert("Introduce un nombre de planta.");
                 return;
             }
             if (!socket){
-                alert("There is no active connection");
+                alert("No hay conexión activa.");
                 return;
             }
             socket.send(JSON.stringify({
@@ -418,6 +424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!Array.isArray(finalcords.floor)) {
                 finalcords.floor = [];
             }
+            normalizeAllFloors();
             tmpfinalcords = finalcords; //Store original cords in a temp to compare later if it is changed
             console.log("Coordinates loaded:", finalcords);
             distanceEntityMap = data.distance_entity_map || {};
@@ -433,7 +440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 : (data.entities || []).map(ent => ({ id: ent, name: ent }));
             console.log("Entities to track:", entityOptions);
 
-            entSelector.innerHTML = '<option value="">--Please choose an option--</option>';
+            entSelector.innerHTML = '<option value="">--Selecciona una opción--</option>';
             entityOptions.forEach(ent => {
                 const option = document.createElement('option');
                 option.value = ent.id;
@@ -469,7 +476,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Choose which entity to track
         entSelector.addEventListener('change', async () => {
-            if(entSelector.value != "--Please choose an option--"){
+            if(entSelector.value){
                 console.log("väljare");
                 if (socket) {
                     stopTracking();
@@ -489,12 +496,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             await captureCalibrationSample();
         });
         calComputeAutoButton.addEventListener("click", computeAutoCalibration);
+        wallPenaltySaveButton.addEventListener("click", saveWallPenalty);
+        wallPenaltyPresetSelect.addEventListener("change", applyWallPenaltyPreset);
     
     
     // Check if the image is loaded in the canvas
     function checkCanvasImage() {
         if (canvas.width === 0 || canvas.height === 0) {
-            alert("Please load a floorplan first.");
+            alert("Carga primero un plano.");
             return false;
         }
         return true;
@@ -506,7 +515,36 @@ document.addEventListener('DOMContentLoaded', async () => {
             return null;
         }
         SelMapName = floorName;
-        return finalcords.floor.find(floor => floor.name === floorName) || null;
+        const floor = finalcords.floor.find(floor => floor.name === floorName) || null;
+        if (floor) {
+            ensureFloorDefaults(floor);
+        }
+        return floor;
+    }
+
+    function ensureFloorDefaults(floor) {
+        if (!floor || typeof floor !== "object") {
+            return;
+        }
+        if (!Array.isArray(floor.receivers)) {
+            floor.receivers = [];
+        }
+        if (!Array.isArray(floor.zones)) {
+            floor.zones = [];
+        }
+        if (!Array.isArray(floor.walls)) {
+            floor.walls = [];
+        }
+        const parsedPenalty = parseFloat(floor.wall_penalty);
+        floor.wall_penalty = Number.isFinite(parsedPenalty) && parsedPenalty >= 0 ? parsedPenalty : 2.5;
+    }
+
+    function normalizeAllFloors() {
+        if (!Array.isArray(finalcords.floor)) {
+            finalcords.floor = [];
+            return;
+        }
+        finalcords.floor.forEach(ensureFloorDefaults);
     }
 
     function ensureReceiverCalibration(receiver) {
@@ -533,8 +571,58 @@ document.addEventListener('DOMContentLoaded', async () => {
     function refreshCalibrationStatus() {
         const receiverId = calReceiverSelect.value;
         const samples = calibrationSamples[receiverId] || [];
-        const sampleText = samples.length > 0 ? `Samples: ${samples.length}` : "No calibration samples yet.";
+        const sampleText = samples.length > 0 ? `Muestras: ${samples.length}` : "Sin muestras de calibración.";
         calStatus.textContent = sampleText;
+    }
+
+    function loadWallPenaltyForCurrentFloor() {
+        const floor = getCurrentFloor();
+        if (!floor) {
+            wallPenaltyInput.value = "";
+            wallPenaltyPresetSelect.value = "";
+            return;
+        }
+        const currentPenalty = Number(floor.wall_penalty ?? 2.5);
+        wallPenaltyInput.value = currentPenalty.toFixed(2);
+        wallPenaltyPresetSelect.value = matchPenaltyPreset(currentPenalty);
+    }
+
+    function matchPenaltyPreset(value) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) {
+            return "";
+        }
+        for (const preset of wallPenaltyPresets) {
+            if (Math.abs(preset - parsed) < 0.05) {
+                return preset.toString();
+            }
+        }
+        return "";
+    }
+
+    function applyWallPenaltyPreset() {
+        const selected = parseFloat(wallPenaltyPresetSelect.value);
+        if (!Number.isFinite(selected)) {
+            return;
+        }
+        wallPenaltyInput.value = selected.toFixed(2);
+    }
+
+    function saveWallPenalty() {
+        const floor = getCurrentFloor();
+        if (!floor) {
+            alert("Selecciona primero una planta.");
+            return;
+        }
+        const penalty = parseFloat(wallPenaltyInput.value);
+        if (!Number.isFinite(penalty) || penalty < 0) {
+            alert("La penalización por pared debe ser un número mayor o igual a 0.");
+            return;
+        }
+        floor.wall_penalty = penalty;
+        wallPenaltyPresetSelect.value = matchPenaltyPreset(penalty);
+        savebuttondiv.appendChild(saveButton);
+        calStatus.textContent = `Penalización por pared guardada: ${penalty.toFixed(2)} m`;
     }
 
     function loadCalibrationInputsForSelectedReceiver() {
@@ -565,7 +653,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const previousReceiver = calReceiverSelect.value;
         const previousEntity = calEntitySelect.value;
 
-        calReceiverSelect.innerHTML = '<option value="">Receiver...</option>';
+        calReceiverSelect.innerHTML = '<option value="">Receptor...</option>';
         if (floor) {
             floor.receivers.forEach(receiver => {
                 const option = document.createElement("option");
@@ -580,7 +668,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             calReceiverSelect.value = floor.receivers[0].entity_id;
         }
 
-        calEntitySelect.innerHTML = '<option value="">Device...</option>';
+        calEntitySelect.innerHTML = '<option value="">Dispositivo...</option>';
         Array.from(entSelector.options).forEach(opt => {
             if (!opt.value) return;
             const option = document.createElement("option");
@@ -595,6 +683,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         loadCalibrationInputsForSelectedReceiver();
+        loadWallPenaltyForCurrentFloor();
     }
 
     async function readStateValue(entityId = "", targetId = "", receiverId = "") {
@@ -623,31 +712,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         const floor = getCurrentFloor();
         const receiverId = calReceiverSelect.value;
         if (!floor || !receiverId) {
-            alert("Select a floor/map and receiver first.");
+            alert("Selecciona primero una planta/mapa y un receptor.");
             return;
         }
 
         const factor = parseFloat(calFactorInput.value);
         const offset = parseFloat(calOffsetInput.value || "0");
         if (Number.isNaN(factor) || factor <= 0) {
-            alert("Factor must be a number greater than 0.");
+            alert("El factor debe ser un número mayor que 0.");
             return;
         }
         if (Number.isNaN(offset)) {
-            alert("Offset must be numeric.");
+            alert("El offset debe ser numérico.");
             return;
         }
 
         const receiver = floor.receivers.find(r => r.entity_id === receiverId);
         if (!receiver) {
-            alert("Receiver not found on selected floor.");
+            alert("No se encontró el receptor en la planta seleccionada.");
             return;
         }
 
         receiver.calibration = { factor, offset };
         savebuttondiv.appendChild(saveButton);
         drawElements();
-        calStatus.textContent = `Manual calibration saved for ${receiverId}.`;
+        calStatus.textContent = `Calibración manual guardada para ${receiverId}.`;
     }
 
     async function captureCalibrationSample() {
@@ -657,17 +746,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         const measuredMeters = parseFloat(calMeasuredMetersInput.value);
 
         if (!floor || !receiverId || !deviceId) {
-            alert("Choose floor/map, receiver and device first.");
+            alert("Selecciona primero planta/mapa, receptor y dispositivo.");
             return;
         }
         if (Number.isNaN(measuredMeters) || measuredMeters <= 0) {
-            alert("Measured meters must be greater than 0.");
+            alert("Los metros medidos deben ser mayores que 0.");
             return;
         }
 
         const distanceEntity = getDistanceEntityForSelection(deviceId, receiverId);
         if (!distanceEntity) {
-            alert(`No distance entity found for ${deviceId} -> ${receiverId}.`);
+            alert(`No se encontró entidad de distancia para ${deviceId} -> ${receiverId}.`);
             return;
         }
         try {
@@ -680,11 +769,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 measured: measuredMeters,
             });
             refreshCalibrationStatus();
-            calStatus.textContent = `Captured sample ${calibrationSamples[receiverId].length}: observed ${observed.toFixed(2)} m, real ${measuredMeters.toFixed(2)} m.`;
+            calStatus.textContent = `Muestra ${calibrationSamples[receiverId].length}: observado ${observed.toFixed(2)} m, real ${measuredMeters.toFixed(2)} m.`;
             calMeasuredMetersInput.value = "";
         } catch (err) {
             console.error("Calibration capture error:", err);
-            alert(`Could not capture sample from ${distanceEntity}.`);
+            alert(`No se pudo capturar muestra de ${distanceEntity}.`);
         }
     }
 
@@ -692,12 +781,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         const floor = getCurrentFloor();
         const receiverId = calReceiverSelect.value;
         if (!floor || !receiverId) {
-            alert("Select a receiver first.");
+            alert("Selecciona primero un receptor.");
             return;
         }
         const samples = calibrationSamples[receiverId] || [];
         if (samples.length === 0) {
-            alert("Capture at least one sample first.");
+            alert("Captura al menos una muestra primero.");
             return;
         }
 
@@ -724,7 +813,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         if (!Number.isFinite(factor) || factor <= 0) {
-            alert("Computed factor is invalid. Capture cleaner samples.");
+            alert("El factor calculado no es válido. Captura muestras más limpias.");
             return;
         }
         if (!Number.isFinite(offset)) {
@@ -733,7 +822,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const receiver = floor.receivers.find(r => r.entity_id === receiverId);
         if (!receiver) {
-            alert("Receiver not found.");
+            alert("No se encontró el receptor.");
             return;
         }
 
@@ -742,7 +831,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         calOffsetInput.value = offset.toFixed(3);
         savebuttondiv.appendChild(saveButton);
         drawElements();
-        calStatus.textContent = `Auto calibration applied to ${receiverId}: factor ${factor.toFixed(3)}, offset ${offset.toFixed(3)}.`;
+        calStatus.textContent = `Autocalibración aplicada a ${receiverId}: factor ${factor.toFixed(3)}, offset ${offset.toFixed(3)}.`;
     }
 
     // Remove all listeners
@@ -753,20 +842,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         canvas.removeEventListener("mousedown", startDrawingZone);
         canvas.removeEventListener("mouseup", endDrawingScale);
         canvas.removeEventListener('click', placeReceiver);
+        canvas.removeEventListener("click", handleWallClick);
     }
 
     //Reset all buttons
     function buttonreset(){
         if (scaleInputElement) {scaleInputElement.style.display = "none";}
-        SetScaleButton.innerHTML = SetScaleButton.innerHTML.replace("Save Scale","Set Scale");
+        SetScaleButton.innerHTML = SetScaleButton.innerHTML.replace("Guardar escala","Establecer escala");
         SetScaleButton.setAttribute('data-active', 'false');
         if (entityInput) {entityInput.style.display = "none";}
-        addDeviceButton.innerHTML = addDeviceButton.innerHTML.replace("Save Receiver","Place Receiver");
+        addDeviceButton.innerHTML = addDeviceButton.innerHTML.replace("Guardar receptor","Colocar receptor");
         addDeviceButton.setAttribute('data-active', 'false');
         if (zoneInputElement) {zoneInputElement.style.display = "none";}
-        drawAreaButton.innerHTML = drawAreaButton.innerHTML.replace("Save Zone","Draw Zone");
+        drawAreaButton.innerHTML = drawAreaButton.innerHTML.replace("Guardar zona","Dibujar zona");
         drawAreaButton.setAttribute('data-active', 'false');
+        drawWallButton.innerHTML = drawWallButton.innerHTML.replace("Terminar paredes","Dibujar pared");
+        drawWallButton.setAttribute('data-active', 'false');
         messdiv.innerHTML = "";
+        wallStartPoint = null;
     }
 
     document.addEventListener('click', (event) => {
@@ -816,6 +909,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             clearCanvas();
             drawElements();
         }
+        if (event.target.closest('[data-type="removewall"]')) {
+            const button = event.target.closest('[data-type="removewall"]');
+            const index = parseInt(button.getAttribute('data-index'), 10);
+            const floor = getCurrentFloor();
+            if (floor && Number.isInteger(index) && index >= 0 && index < floor.walls.length) {
+                floor.walls.splice(index, 1);
+                savebuttondiv.appendChild(saveButton);
+                clearCanvas();
+                drawElements();
+            }
+        }
         if (event.target.closest('[data-type="collapse"]')) {
             const collapseDiv = event.target.closest('[data-type="collapse"]');
             const parent = collapseDiv.closest('.fixed'); // Find the nearest parent element to collapseDiv
@@ -850,6 +954,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!checkCanvasImage()) return;
         removeListeners();
         drawAreaButton.remove();
+        drawWallButton.remove();
         addDeviceButton.remove();
         clearCanvasButton.remove();
         SetScaleButton.remove();
@@ -889,22 +994,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (drawAreaButton.dataset.active === 'false') {
             buttonreset();
             canvas.addEventListener("mousedown", startDrawingZone);
-            drawAreaButton.innerHTML = drawAreaButton.innerHTML.replace("Draw Zone","Save Zone");
+            drawAreaButton.innerHTML = drawAreaButton.innerHTML.replace("Dibujar zona","Guardar zona");
             drawAreaButton.setAttribute('data-active', 'true');
-            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instructions</h4><p class="text-sm text-gray-500">Please a zone by clicking on the floor image. Scale the zone by draging the corner circles and enter the zone name. A good idea is to match the name with areas you have in Home Assistant.</p>';
+            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instrucciones</h4><p class="text-sm text-gray-500">Crea una zona haciendo clic en el plano. Ajusta el tamaño arrastrando las esquinas y escribe el nombre de la zona.</p>';
         } else if (drawAreaButton.dataset.active === 'true') {
             if (!mapname.value) {
-                alert("Please enter a floor name!");
+                alert("Introduce un nombre de planta.");
                 return;
             }
             SelMapName = mapname.value;
             if (!rectangle) {
-                alert("No zone has been drawn.");
+                alert("No se ha dibujado ninguna zona.");
                 return;
             }
             zoneName = document.getElementById('zoneName').value.trim();
             if (!zoneName) {
-                alert("Please provide a name for the zone.");
+                alert("Indica un nombre para la zona.");
                 return;
             }
 
@@ -919,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 cords: zonecords
               }; 
             if(addDataToFloor(finalcords, SelMapName, "zones", newZone)){
-                alert(`Zone saved: ${zoneName}`);
+                alert(`Zona guardada: ${zoneName}`);
                 console.log("Saved coordinates:", zonecords);
                 buttonreset();
                 zoneInputElement.value = "";
@@ -963,6 +1068,72 @@ document.addEventListener('DOMContentLoaded', async () => {
         canvas.addEventListener("mouseup", setHandles);
     }
 
+    // =================================================================
+    // Draw walls
+    // =================================================================
+
+    drawWallButton.addEventListener("click", () => {
+        if (!checkCanvasImage()) return;
+        removeListeners();
+        clearCanvas();
+        drawElements();
+
+        if (drawWallButton.dataset.active === 'false') {
+            buttonreset();
+            drawWallButton.setAttribute('data-active', 'true');
+            drawWallButton.innerHTML = drawWallButton.innerHTML.replace("Dibujar pared", "Terminar paredes");
+            wallStartPoint = null;
+            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instrucciones</h4><p class="text-sm text-gray-500">Haz clic en el inicio y fin de cada pared. Cada 2 clics se guarda una pared recta.</p>';
+            canvas.addEventListener("click", handleWallClick);
+        } else {
+            buttonreset();
+            clearCanvas();
+            drawElements();
+        }
+    });
+
+    function handleWallClick(event) {
+        const floor = getCurrentFloor();
+        if (!floor) {
+            alert("Selecciona una planta.");
+            return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const point = {
+            x: (event.clientX - rect.left) * scaleX,
+            y: (event.clientY - rect.top) * scaleY,
+        };
+
+        if (!wallStartPoint) {
+            wallStartPoint = point;
+            clearCanvas();
+            drawElements();
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
+            ctx.fillStyle = "#111827";
+            ctx.fill();
+            return;
+        }
+
+        if (Math.abs(wallStartPoint.x - point.x) < 1 && Math.abs(wallStartPoint.y - point.y) < 1) {
+            return;
+        }
+
+        const wall = {
+            x1: wallStartPoint.x,
+            y1: wallStartPoint.y,
+            x2: point.x,
+            y2: point.y,
+        };
+        floor.walls.push(wall);
+        wallStartPoint = null;
+        savebuttondiv.appendChild(saveButton);
+        clearCanvas();
+        drawElements();
+    }
+
     function setHandles(event){
         selectedHandle = null;
         tmphandles = handles;
@@ -977,7 +1148,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             zoneInputElement = document.createElement("input");
             zoneInputElement.type = "text";
             zoneInputElement.id = "zoneName";
-            zoneInputElement.placeholder = "Name";
+            zoneInputElement.placeholder = "Nombre";
             zoneInputElement.classList.add("zone-input");
             document.body.appendChild(zoneInputElement);
         }
@@ -1082,8 +1253,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (SetScaleButton.dataset.active === 'false') {
             buttonreset();
-            SetScaleButton.innerHTML = SetScaleButton.innerHTML.replace("Set Scale","Save Scale");
-            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instructions</h4><p class="text-sm text-gray-500">Set the scale by clicking on the desired starting point and then again on the desired end point. Enter the actual (real-world) distance in the input element</p>';
+            SetScaleButton.innerHTML = SetScaleButton.innerHTML.replace("Establecer escala","Guardar escala");
+            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instrucciones</h4><p class="text-sm text-gray-500">Marca dos puntos de referencia y escribe la distancia real en metros.</p>';
             startPoint = null;
             endPoint = null;
 
@@ -1169,18 +1340,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function saveScale() {
         if (!startPoint || !endPoint || startPoint.x === endPoint.x || startPoint.y === endPoint.y) {
-            alert("Please draw a line first.");
+            alert("Primero debes dibujar una línea.");
             return;
         }
 
         const scaleInput = parseFloat(scaleInputElement?.value || "");
         if (isNaN(scaleInput) || scaleInput <= 0) {
-            alert("Please enter the actual length in meters.");
+            alert("Introduce la distancia real en metros.");
             return;
         }
 
         if (!mapname.value) {
-            alert("Floor name must be set.");
+            alert("Debes indicar un nombre de planta.");
             return;
         }
         SelMapName = mapname.value;
@@ -1213,22 +1384,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (addDeviceButton.dataset.active === 'false') {
             buttonreset();
-            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instructions</h4><p class="text-sm text-gray-500">Please place BLE receivers by placing them on the floorplan. In the input element, enter the name of the receiver. If you have a Bermuda sensor named for example: "eriks_apple_watch_distance_to_nsp_kitchen" then the receiver name should be "nsp_kitchen"</p>';
+            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instrucciones</h4><p class="text-sm text-gray-500">Coloca los receptores BLE sobre el plano y escribe su identificador. Si Bermuda usa "..._distance_to_bluetooth_proxy_cocina", el receptor sería "bluetooth_proxy_cocina".</p>';
             
             canvas.addEventListener('click', placeReceiver);
             addDeviceButton.setAttribute('data-active', 'true');
-            addDeviceButton.innerHTML = addDeviceButton.innerHTML.replace("Place Receiver","Save Receiver");
+            addDeviceButton.innerHTML = addDeviceButton.innerHTML.replace("Colocar receptor","Guardar receptor");
 
         } else if (addDeviceButton.dataset.active === 'true') {
             if (!mapname.value) {
-                alert("Floor name must be set.");
+                alert("Debes indicar un nombre de planta.");
                 return;
             }
             SelMapName = mapname.value;
             receiverName = document.getElementById('receiverName').value.trim();
             
-            if (!receiverName || !tmpcords) {
-                alert("Receiver coordinates must be set.");
+            if (
+                !receiverName
+                || !tmpcords
+                || !Number.isFinite(tmpcords.x)
+                || !Number.isFinite(tmpcords.y)
+            ) {
+                alert("Debes indicar las coordenadas del receptor.");
                 return;
             }
 
@@ -1246,7 +1422,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 entityInput.value = "";
                 clearCanvas();
                 drawElements();
-                console.log("Receiver saved successfully!");
+                console.log("Receptor guardado correctamente.");
             } else {
                 console.log("Could not save data to array");
             }
@@ -1269,7 +1445,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             entityInput = document.createElement("input");
             entityInput.type = "text";
             entityInput.id = "receiverName";
-            entityInput.placeholder = "Name";
+            entityInput.placeholder = "Nombre";
             entityInput.setAttribute("list", "receiverSuggestions");
             entityInput.classList.add("rec-input");
             document.body.appendChild(entityInput);
@@ -1308,7 +1484,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             name: floorName,
             scale: null,
             receivers: [],
-            zones: []
+            zones: [],
+            walls: [],
+            wall_penalty: 2.5
             });
             console.log(`Added new floor: ${floorName}`);
         } else {
@@ -1318,12 +1496,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         let floor = finalcords.floor.find(floor => floor.name === floorName); // Find correct floor
 
         if (floor) {
-            if (!Array.isArray(floor.receivers)) {
-                floor.receivers = [];
-            }
-            if (!Array.isArray(floor.zones)) {
-                floor.zones = [];
-            }
+            ensureFloorDefaults(floor);
             // Control if receiver/zone with the name already exists on the floor
             let enitityExists = null;
             let tmpname = null;
@@ -1331,12 +1504,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!data.calibration) {
                     data.calibration = { factor: 1, offset: 0 };
                 }
-                enitityExists = floor[dataType].some(receiver => receiver.entity_id === receiverName);
-                tmpname = receiverName;
+                enitityExists = floor[dataType].some(receiver => receiver.entity_id === data.entity_id);
+                tmpname = data.entity_id;
             }
             if(dataType === "zones"){
-                enitityExists = floor[dataType].some(zone => zone.entity_id === zoneName);
-                tmpname = zoneName;
+                enitityExists = floor[dataType].some(zone => zone.entity_id === data.entity_id);
+                tmpname = data.entity_id;
+            }
+            if(dataType === "walls"){
+                floor.walls.push(data);
+                savebuttondiv.appendChild(saveButton);
+                return true;
             }
             if(dataType === "scale"){
                 floor.scale = data;
@@ -1351,7 +1529,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return true;
               } else {
                 console.log(`'${dataType}' with the name '${tmpname}' already exists on ${floorName}.`);
-                alert(`'${dataType}' with the name '${tmpname}' already exists on ${floorName}.`);
+                alert(`Ya existe '${tmpname}' en '${floorName}'.`);
                 buttonreset();
                 clearCanvas();
                 drawElements();
@@ -1387,20 +1565,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         const scaleX = canvas.width / rect.width; // Horisontal scale
         const scaleY = canvas.height / rect.height; // Vertical scale
 
-        const x = (xp - rect.left) * scaleX;
-        const y = (yp - rect.top) * scaleY;
-
-        tmpcords = { x, y };
-        let newReceiver = {
-            entity_id: receiverName,
-            type: type,
-            cords: tmpcords
-          };
-        tmpdrawcords.push(newReceiver); // Add new coordinates
+        if (
+            Number.isFinite(xp)
+            && Number.isFinite(yp)
+            && type === "receiver"
+        ) {
+            const x = (xp - rect.left) * scaleX;
+            const y = (yp - rect.top) * scaleY;
+            tmpcords = { x, y };
+            tmpdrawcords.push({
+                entity_id: receiverName,
+                type: type,
+                cords: tmpcords,
+            });
+        }
 
         let floor = finalcords.floor.find(floor => floor.name === SelMapName); //Add all existing
 
         if (floor) {
+            ensureFloorDefaults(floor);
             myScaleVal = floor.scale; // Get the scalevalue for the floor
             scaleStatus(myScaleVal)//Show or hide status for scale value
             savebuttondiv.appendChild(deleteButton); //If there is data add the delete button to be able to delete the floor.
@@ -1422,10 +1605,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 zone.type = "zone";
                 tmpdrawcords.push(zone);
             });
+            floor.walls.forEach((wall, index) => {
+                tmpdrawcords.push({
+                    ...wall,
+                    type: "wall",
+                    wall_index: index,
+                });
+            });
         }
 
         let tmpHTMLrec = ""; 
         let tmpHTMLzone = "";
+        let tmpHTMLwalls = "";
         tmpdrawcords.forEach((item, index) => {
 
             if (item.type == "receiver"){
@@ -1469,16 +1660,42 @@ document.addEventListener('DOMContentLoaded', async () => {
                     tmpHTMLzone = tmpHTMLzone + newelement.replace("typename", item.entity_id).replace("removexxx", "removezone").replace("idxxx", item.entity_id).replace("idxxx", item.entity_id);
                 }
             }
+            if (item.type == "wall") {
+                ctx.beginPath();
+                ctx.moveTo(item.x1, item.y1);
+                ctx.lineTo(item.x2, item.y2);
+                ctx.strokeStyle = "#111827";
+                ctx.lineWidth = 4;
+                ctx.stroke();
+                const wallLabel = `Pared ${item.wall_index + 1}`;
+                tmpHTMLwalls += `
+                    <ul class="space-y-2" id="wall_${item.wall_index}">
+                        <li class="flex items-center justify-between bg-gray-50 p-2 rounded">
+                            <span class="text-sm truncate">${wallLabel}</span>
+                            <div class="flex gap-2">
+                                <button data-type="removewall" data-index="${item.wall_index}" class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium hover:bg-accent hover:text-accent-foreground w-10">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash w-4 h-4"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
+                                </button>
+                            </div>
+                        </li>
+                    </ul>
+                `;
+            }
         });
         if(tmpHTMLrec !== ""){
             document.getElementById('divrec').innerHTML = tmpHTMLrec;
         } else{
-            document.getElementById('divrec').innerHTML = '<p class="text-sm text-gray-500">No receivers placed</p>';
+            document.getElementById('divrec').innerHTML = '<p class="text-sm text-gray-500">No hay receptores colocados</p>';
         }
         if(tmpHTMLzone !== ""){
             document.getElementById('divzones').innerHTML = tmpHTMLzone;
         } else{
-            document.getElementById('divzones').innerHTML = '<p class="text-sm text-gray-500">No zones drawn</p>';
+            document.getElementById('divzones').innerHTML = '<p class="text-sm text-gray-500">No hay zonas dibujadas</p>';
+        }
+        if(tmpHTMLwalls !== ""){
+            document.getElementById('divwalls').innerHTML = tmpHTMLwalls;
+        } else{
+            document.getElementById('divwalls').innerHTML = '<p class="text-sm text-gray-500">No hay paredes dibujadas</p>';
         }
         refreshCalibrationSelectors();
 
@@ -1521,38 +1738,46 @@ document.addEventListener('DOMContentLoaded', async () => {
             drawAreaButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg]:size-4 [&amp;_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
             drawAreaButton.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-pencil w-4 h-4 mr-2" data-component-name="Pencil"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg>
-                    Draw Zone
+                    Dibujar zona
                 `;
             drawAreaButton.setAttribute('data-active', 'false');
+
+            drawWallButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg]:size-4 [&amp;_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
+            drawWallButton.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-panel-top w-4 h-4 mr-2"><path d="M3 3h18"></path><path d="M4 3h16v18H4z"></path></svg>
+                    Dibujar pared
+                `;
+            drawWallButton.setAttribute('data-active', 'false');
 
             addDeviceButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
             addDeviceButton.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-radio w-4 h-4 mr-2" data-component-name="Radio"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"></path><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"></path><circle cx="12" cy="12" r="2"></circle><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"></path><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"></path></svg>
-                    Place Receiver
+                    Colocar receptor
                 `;
             addDeviceButton.setAttribute('data-active', 'false');
 
             SetScaleButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
             SetScaleButton.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-ruler w-4 h-4 mr-2" data-component-name="Ruler"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"></path><path d="m14.5 12.5 2-2"></path><path d="m11.5 9.5 2-2"></path><path d="m8.5 6.5 2-2"></path><path d="m17.5 15.5 2-2"></path></svg>
-                    Set Scale
+                    Establecer escala
                 `;
             SetScaleButton.setAttribute('data-active', 'false');
             
             clearCanvasButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
             clearCanvasButton.innerHTML = `
                 <svg width="24px" height="24px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 9L15 15" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 9L9 15" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                    Clear Canvas
+                    Limpiar lienzo
                 `;
             
             saveButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg]:size-4 [&amp;_svg]:shrink-0 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2';
             saveButton.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-save w-4 h-4 mr-2" data-component-name="Save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"></path><path d="M7 3v4a1 1 0 0 0 1 1h7"></path></svg>
-                    Save Floor Plan
+                    Guardar plano
                 `;
             
             mapbuttondiv.appendChild(addDeviceButton);
             mapbuttondiv.appendChild(drawAreaButton);
+            mapbuttondiv.appendChild(drawWallButton);
             mapbuttondiv.appendChild(SetScaleButton);
             mapbuttondiv.appendChild(clearCanvasButton);
         });
@@ -1589,14 +1814,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         if(saveresult){
             tmpfinalcords = finalcords;
             saveButton.remove();
-            alert('Saved successfully!');
+            alert('Guardado correctamente.');
             getSavedMaps();
         }
     });
 
     //When clicking the delete button, remove the floor and reset the canvas.
     deleteButton.addEventListener("click", async function () {
-        const userConfirmed = confirm("Are you sure you want to remove the floor named "+SelMapName+"?");
+        const userConfirmed = confirm("¿Seguro que quieres eliminar la planta "+SelMapName+"?");
         let tmpfinal = JSON.parse(JSON.stringify(finalcords)); //Save the array to a temporary
 
         if (userConfirmed) {
@@ -1604,7 +1829,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             removefile = true;
             let saveresult = await savedata();
             if(saveresult){
-                alert("The floor named "+SelMapName+" has been removed!");
+                alert("Se ha eliminado la planta "+SelMapName+".");
                 console.log("Updated data:", finalcords); // Control the updated data
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 mapname.value = "";
@@ -1613,15 +1838,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 finalcords = tmpfinal; //If not able to delete, restore the array
             }
         } else {
-            alert("Action canceled. No changes were made.");
+            alert("Acción cancelada. No se aplicaron cambios.");
             finalcords = tmpfinal;
         }
     });
 
     async function savedata(){
-        if(myScaleVal == null){
-            alert("You have not added a scale, it won't work without it!");
-            return;
+        if (!(removefile === true && new_floor === false)) {
+            const floor = getCurrentFloor();
+            if (!floor || !Number.isFinite(Number(floor.scale)) || Number(floor.scale) <= 0) {
+                alert("No has definido la escala. Sin escala no funcionará.");
+                return;
+            }
+            myScaleVal = Number(floor.scale);
         }
         
         removeListeners();
@@ -1653,6 +1882,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             if (response.ok) {
                 drawAreaButton.remove();
+                drawWallButton.remove();
                 addDeviceButton.remove();
                 clearCanvasButton.remove();
                 SetScaleButton.remove();
@@ -1660,11 +1890,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 new_floor = false;
                 return true;
             } else {
-                alert('Error saving data!');
+                alert('Error al guardar los datos.');
             }
         } catch (error) {
             console.error('Error saving data:', error);
-            alert('Error saving data!');
+            alert('Error al guardar los datos.');
         }
     }
 

@@ -26,7 +26,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.template import Template
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, LineString
 from scipy.optimize import least_squares
 import voluptuous as vol
 try:
@@ -369,7 +369,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
     if not hasattr(update_trilateration_and_zone, "position_history"):
         update_trilateration_and_zone.position_history = {}
 
-    lowest_floor_name, filtered_cords = extract_floor_and_receivers(
+    lowest_floor_name, filtered_cords, walls, wall_penalty = extract_floor_and_receivers(
         new_global_data, entity
     )
     # filtered_cords: list of (x, y, r)
@@ -396,7 +396,9 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         # Too few points left for trilateration
         return
 
-    tricords = trilaterate(filtered)
+    tricords = trilaterate(
+        filtered, walls=walls, wall_penalty=wall_penalty
+    )
     if tricords is not None:
         # Moving average filtering
         history = update_trilateration_and_zone.position_history.setdefault(
@@ -459,9 +461,11 @@ async def process_entities(hass, new_global_data):
 
 
 def extract_floor_and_receivers(new_global_data, tmpentity):
-    """Find floor with closest receiver and return explicit (x, y, r) points."""
+    """Find floor with closest receiver and return points + wall model."""
     floor_points = {}
     floor_min_r = {}
+    floor_walls = {}
+    floor_wall_penalty = {}
 
     for entity in new_global_data:
         if entity["entity"] != tmpentity:
@@ -495,12 +499,23 @@ def extract_floor_and_receivers(new_global_data, tmpentity):
             if points:
                 floor_points[floor_name] = points
                 floor_min_r[floor_name] = min_r
+                floor_walls[floor_name] = floor.get("walls", [])
+                try:
+                    penalty = float(floor.get("wall_penalty", 2.5))
+                except (TypeError, ValueError):
+                    penalty = 2.5
+                floor_wall_penalty[floor_name] = max(0.0, penalty)
 
     if not floor_min_r:
-        return None, []
+        return None, [], [], 0.0
 
     lowest_floor_name = min(floor_min_r, key=floor_min_r.get)
-    return lowest_floor_name, floor_points.get(lowest_floor_name, [])
+    return (
+        lowest_floor_name,
+        floor_points.get(lowest_floor_name, []),
+        floor_walls.get(lowest_floor_name, []),
+        floor_wall_penalty.get(lowest_floor_name, 0.0),
+    )
 
 
 def find_zone_for_point(data, entity, floor_name, point):
@@ -1268,7 +1283,40 @@ class BPSEntityWebSocket:
 
 
 # Trilateration function
-def trilaterate(known_points):
+def _parse_wall_segments(raw_walls):
+    """Convert persisted wall data into usable line segments."""
+    segments = []
+    for wall in raw_walls or []:
+        try:
+            x1 = float(wall.get("x1"))
+            y1 = float(wall.get("y1"))
+            x2 = float(wall.get("x2"))
+            y2 = float(wall.get("y2"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if x1 == x2 and y1 == y2:
+            continue
+        segments.append(LineString([(x1, y1), (x2, y2)]))
+    return segments
+
+
+def _count_wall_crossings(path: LineString, wall_segments: list[LineString]) -> int:
+    """Count wall intersections excluding degenerate collinear overlaps."""
+    crossings = 0
+    for wall in wall_segments:
+        if not path.intersects(wall):
+            continue
+        intersection = path.intersection(wall)
+        if intersection.is_empty:
+            continue
+        if intersection.geom_type in ("LineString", "MultiLineString"):
+            # Path aligned with a wall; ignore to avoid over-penalizing.
+            continue
+        crossings += 1
+    return crossings
+
+
+def trilaterate(known_points, walls=None, wall_penalty: float = 0.0):
     num_points = len(known_points)
 
     if num_points < 3:
@@ -1278,12 +1326,22 @@ def trilaterate(known_points):
         )
         return None
 
+    wall_segments = _parse_wall_segments(walls)
+    penalty = max(0.0, float(wall_penalty or 0.0))
+
     def objective_function(X, known_points):
         # Define the objective function loss for the least squares method.
         x, y = X
         residuals = []
         for xi, yi, ri in known_points:
-            residual = np.sqrt((xi - x) ** 2 + (yi - y) ** 2) - ri
+            line_distance = np.sqrt((xi - x) ** 2 + (yi - y) ** 2)
+            if wall_segments and penalty > 0:
+                path = LineString([(x, y), (xi, yi)])
+                crossings = _count_wall_crossings(path, wall_segments)
+            else:
+                crossings = 0
+            effective_distance = line_distance + (crossings * penalty)
+            residual = effective_distance - ri
             residuals.append(residual)
         weights = 1.0 / np.array([ri**2 for _, _, ri in known_points])
         return np.sqrt(weights) * np.array(residuals)
