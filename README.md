@@ -101,6 +101,15 @@ Reinicia Home Assistant.
 5. Guardar
 6. Aparecerán entidades + panel lateral
 
+### Calibración amigable (sin JSON)
+
+En el panel lateral, sección **Calibration**:
+
+1. Selecciona un `receiver` y define `factor` + `offset` para calibración manual.
+2. Para calibración automática: elige dispositivo, escribe metros reales medidos y pulsa **Capture** varias veces.
+3. Pulsa **Auto Calibrate** para calcular ajuste automáticamente.
+4. Guarda el plano para persistir cambios.
+
 ---
 
 ## 📊 Entidades creadas

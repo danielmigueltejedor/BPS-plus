@@ -21,6 +21,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const trackdiv = document.getElementById('trackdiv');
     const zonediv = document.getElementById('zonediv');
     const messdiv = document.getElementById('message');
+    const calReceiverSelect = document.getElementById('calReceiver');
+    const calFactorInput = document.getElementById('calFactor');
+    const calOffsetInput = document.getElementById('calOffset');
+    const calSaveManualButton = document.getElementById('calSaveManual');
+    const calEntitySelect = document.getElementById('calEntity');
+    const calMeasuredMetersInput = document.getElementById('calMeasuredMeters');
+    const calCaptureSampleButton = document.getElementById('calCaptureSample');
+    const calComputeAutoButton = document.getElementById('calComputeAuto');
+    const calStatus = document.getElementById('calStatus');
     const saveButton = document.createElement('button');
 
     //Delete button
@@ -57,6 +66,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let imgfilename = "";
     let device = "";
     let myScaleVal = null;
+    const calibrationSamples = {};
 
     const newelement = `
                 <ul class="space-y-2" id="idxxx">
@@ -278,6 +288,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 
                 let floor = finalcords.floor.find(floor => floor.name === SelMapName);
                 let rec = floor.receivers.find(element => element.entity_id === newEid);
+                if (!rec) {
+                    return;
+                }
+                const correctedMeters = getCalibratedDistance(parseFloat(state), rec);
                 if (index !== -1) {
                     //The entity exists, update
                     NewEnts.splice(index, 1, {
@@ -285,14 +299,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                         cords: [
                             NewEnts[index].cords[0], // Keep existing x
                             NewEnts[index].cords[1], // Keep existing y
-                            state * floor.scale      // Update z
+                            correctedMeters * floor.scale      // Update z
                         ]
                     });
                     
                 } else {
                     NewEnts.push({
                         eid: newEid, 
-                        cords: [rec.cords.x, rec.cords.y, state * floor.scale]
+                        cords: [rec.cords.x, rec.cords.y, correctedMeters * floor.scale]
                     });
                 }
             } 
@@ -346,7 +360,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         
             const data = await response.json();
         
-            finalcords = JSON.parse(data.coordinates);
+            finalcords = data.coordinates ? JSON.parse(data.coordinates) : { floor: [] };
+            if (!Array.isArray(finalcords.floor)) {
+                finalcords.floor = [];
+            }
             tmpfinalcords = finalcords; //Store original cords in a temp to compare later if it is changed
             console.log("Coordinates loaded:", finalcords);
             let ents = data.entities;
@@ -359,6 +376,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 option.textContent = ent;
                 entSelector.appendChild(option);
             });
+            refreshCalibrationSelectors();
 
             } catch (error) {
                 console.error("Error fetching BPS data:", error); // Handle possible error during fetch-call
@@ -400,6 +418,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 starttrackbtn.style.display = "none";
             }
         });
+
+        calReceiverSelect.addEventListener("change", loadCalibrationInputsForSelectedReceiver);
+        calSaveManualButton.addEventListener("click", saveManualCalibration);
+        calCaptureSampleButton.addEventListener("click", async () => {
+            await captureCalibrationSample();
+        });
+        calComputeAutoButton.addEventListener("click", computeAutoCalibration);
     
     
     // Check if the image is loaded in the canvas
@@ -409,6 +434,232 @@ document.addEventListener('DOMContentLoaded', async () => {
             return false;
         }
         return true;
+    }
+
+    function getCurrentFloor() {
+        if (!SelMapName) {
+            return null;
+        }
+        return finalcords.floor.find(floor => floor.name === SelMapName) || null;
+    }
+
+    function ensureReceiverCalibration(receiver) {
+        if (!receiver.calibration || typeof receiver.calibration !== "object") {
+            receiver.calibration = { factor: 1, offset: 0 };
+        }
+        if (Number.isNaN(parseFloat(receiver.calibration.factor))) {
+            receiver.calibration.factor = 1;
+        }
+        if (Number.isNaN(parseFloat(receiver.calibration.offset))) {
+            receiver.calibration.offset = 0;
+        }
+        return receiver.calibration;
+    }
+
+    function getCalibratedDistance(rawDistance, receiver) {
+        const calibration = ensureReceiverCalibration(receiver);
+        const factor = parseFloat(calibration.factor ?? 1);
+        const offset = parseFloat(calibration.offset ?? 0);
+        const corrected = (rawDistance * factor) + offset;
+        return Math.max(corrected, 0);
+    }
+
+    function refreshCalibrationStatus() {
+        const receiverId = calReceiverSelect.value;
+        const samples = calibrationSamples[receiverId] || [];
+        const sampleText = samples.length > 0 ? `Samples: ${samples.length}` : "No calibration samples yet.";
+        calStatus.textContent = sampleText;
+    }
+
+    function loadCalibrationInputsForSelectedReceiver() {
+        const floor = getCurrentFloor();
+        if (!floor || !calReceiverSelect.value) {
+            calFactorInput.value = "";
+            calOffsetInput.value = "";
+            refreshCalibrationStatus();
+            return;
+        }
+
+        const receiver = floor.receivers.find(r => r.entity_id === calReceiverSelect.value);
+        if (!receiver) {
+            calFactorInput.value = "";
+            calOffsetInput.value = "";
+            refreshCalibrationStatus();
+            return;
+        }
+
+        const calibration = ensureReceiverCalibration(receiver);
+        calFactorInput.value = Number(calibration.factor).toFixed(3);
+        calOffsetInput.value = Number(calibration.offset).toFixed(3);
+        refreshCalibrationStatus();
+    }
+
+    function refreshCalibrationSelectors() {
+        const floor = getCurrentFloor();
+        const previousReceiver = calReceiverSelect.value;
+        const previousEntity = calEntitySelect.value;
+
+        calReceiverSelect.innerHTML = '<option value="">Receiver...</option>';
+        if (floor) {
+            floor.receivers.forEach(receiver => {
+                const option = document.createElement("option");
+                option.value = receiver.entity_id;
+                option.textContent = receiver.entity_id;
+                calReceiverSelect.appendChild(option);
+            });
+        }
+        if (previousReceiver) {
+            calReceiverSelect.value = previousReceiver;
+        }
+
+        calEntitySelect.innerHTML = '<option value="">Device...</option>';
+        Array.from(entSelector.options).forEach(opt => {
+            if (!opt.value) return;
+            const option = document.createElement("option");
+            option.value = opt.value;
+            option.textContent = opt.value;
+            calEntitySelect.appendChild(option);
+        });
+        if (previousEntity) {
+            calEntitySelect.value = previousEntity;
+        }
+
+        loadCalibrationInputsForSelectedReceiver();
+    }
+
+    async function readStateValue(entityId) {
+        const response = await fetch(`/api/states/${entityId}`);
+        if (!response.ok) {
+            throw new Error(`Cannot read ${entityId}: ${response.status}`);
+        }
+        const stateObj = await response.json();
+        const value = parseFloat(stateObj.state);
+        if (Number.isNaN(value)) {
+            throw new Error(`State ${entityId} is not numeric`);
+        }
+        return value;
+    }
+
+    function saveManualCalibration() {
+        const floor = getCurrentFloor();
+        const receiverId = calReceiverSelect.value;
+        if (!floor || !receiverId) {
+            alert("Select floor and receiver first.");
+            return;
+        }
+
+        const factor = parseFloat(calFactorInput.value);
+        const offset = parseFloat(calOffsetInput.value || "0");
+        if (Number.isNaN(factor) || factor <= 0) {
+            alert("Factor must be a number greater than 0.");
+            return;
+        }
+        if (Number.isNaN(offset)) {
+            alert("Offset must be numeric.");
+            return;
+        }
+
+        const receiver = floor.receivers.find(r => r.entity_id === receiverId);
+        if (!receiver) {
+            alert("Receiver not found on selected floor.");
+            return;
+        }
+
+        receiver.calibration = { factor, offset };
+        savebuttondiv.appendChild(saveButton);
+        drawElements();
+        calStatus.textContent = `Manual calibration saved for ${receiverId}.`;
+    }
+
+    async function captureCalibrationSample() {
+        const floor = getCurrentFloor();
+        const receiverId = calReceiverSelect.value;
+        const deviceId = calEntitySelect.value;
+        const measuredMeters = parseFloat(calMeasuredMetersInput.value);
+
+        if (!floor || !receiverId || !deviceId) {
+            alert("Choose receiver and device first.");
+            return;
+        }
+        if (Number.isNaN(measuredMeters) || measuredMeters <= 0) {
+            alert("Measured meters must be greater than 0.");
+            return;
+        }
+
+        const distanceEntity = `sensor.${deviceId}_distance_to_${receiverId}`;
+        try {
+            const observed = await readStateValue(distanceEntity);
+            if (!calibrationSamples[receiverId]) {
+                calibrationSamples[receiverId] = [];
+            }
+            calibrationSamples[receiverId].push({
+                observed,
+                measured: measuredMeters,
+            });
+            refreshCalibrationStatus();
+            calStatus.textContent = `Captured sample ${calibrationSamples[receiverId].length}: observed ${observed.toFixed(2)} m, real ${measuredMeters.toFixed(2)} m.`;
+            calMeasuredMetersInput.value = "";
+        } catch (err) {
+            console.error("Calibration capture error:", err);
+            alert(`Could not capture sample from ${distanceEntity}.`);
+        }
+    }
+
+    function computeAutoCalibration() {
+        const floor = getCurrentFloor();
+        const receiverId = calReceiverSelect.value;
+        if (!floor || !receiverId) {
+            alert("Select a receiver first.");
+            return;
+        }
+        const samples = calibrationSamples[receiverId] || [];
+        if (samples.length === 0) {
+            alert("Capture at least one sample first.");
+            return;
+        }
+
+        let factor = 1;
+        let offset = 0;
+        if (samples.length === 1) {
+            const only = samples[0];
+            factor = only.measured / only.observed;
+        } else {
+            const n = samples.length;
+            const sumX = samples.reduce((acc, s) => acc + s.observed, 0);
+            const sumY = samples.reduce((acc, s) => acc + s.measured, 0);
+            const sumXY = samples.reduce((acc, s) => acc + (s.observed * s.measured), 0);
+            const sumXX = samples.reduce((acc, s) => acc + (s.observed * s.observed), 0);
+
+            const denominator = (n * sumXX) - (sumX * sumX);
+            if (Math.abs(denominator) < 1e-9) {
+                factor = samples.reduce((acc, s) => acc + (s.measured / s.observed), 0) / n;
+                offset = 0;
+            } else {
+                factor = ((n * sumXY) - (sumX * sumY)) / denominator;
+                offset = (sumY - (factor * sumX)) / n;
+            }
+        }
+
+        if (!Number.isFinite(factor) || factor <= 0) {
+            alert("Computed factor is invalid. Capture cleaner samples.");
+            return;
+        }
+        if (!Number.isFinite(offset)) {
+            offset = 0;
+        }
+
+        const receiver = floor.receivers.find(r => r.entity_id === receiverId);
+        if (!receiver) {
+            alert("Receiver not found.");
+            return;
+        }
+
+        receiver.calibration = { factor, offset };
+        calFactorInput.value = factor.toFixed(3);
+        calOffsetInput.value = offset.toFixed(3);
+        savebuttondiv.appendChild(saveButton);
+        drawElements();
+        calStatus.textContent = `Auto calibration applied to ${receiverId}: factor ${factor.toFixed(3)}, offset ${offset.toFixed(3)}.`;
     }
 
     // Remove all listeners
@@ -454,6 +705,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     floor.receivers = floor.receivers.filter(receiver => receiver.entity_id !== idToRemove);
                 }
             });
+            delete calibrationSamples[idToRemove];
             console.log("Removed receiver");
             savebuttondiv.appendChild(saveButton);
             clearCanvas();
@@ -525,6 +777,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         SelMapName = "";
         buttonreset();
         mapSelector.selectedIndex = 0;
+        refreshCalibrationSelectors();
     });
 
     function clearCanvas(){
@@ -898,7 +1151,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             let newReceiver = {
                 entity_id: receiverName,
-                cords: tmpcords
+                cords: tmpcords,
+                calibration: {
+                    factor: 1,
+                    offset: 0
+                }
               };
             
             if(addDataToFloor(finalcords, SelMapName, "receivers", newReceiver)){
@@ -977,10 +1234,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         let floor = finalcords.floor.find(floor => floor.name === floorName); // Find correct floor
 
         if (floor) {
+            if (!Array.isArray(floor.receivers)) {
+                floor.receivers = [];
+            }
+            if (!Array.isArray(floor.zones)) {
+                floor.zones = [];
+            }
             // Control if receiver/zone with the name already exists on the floor
             let enitityExists = null;
             let tmpname = null;
             if(dataType === "receivers"){
+                if (!data.calibration) {
+                    data.calibration = { factor: 1, offset: 0 };
+                }
                 enitityExists = floor[dataType].some(receiver => receiver.entity_id === receiverName);
                 tmpname = receiverName;
             }
@@ -1063,6 +1329,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Loopa through all receivers in floor
             floor.receivers.forEach((receiver, index) => {
+                ensureReceiverCalibration(receiver);
                 receiver.type = "receiver";
                 tmpdrawcords.push(receiver);
             });
@@ -1091,7 +1358,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ctx.fillStyle = "black";
                 ctx.fillText(item.entity_id, x + iconSize / 2 + 5, y);
                 if(item.entity_id){
-                    tmpHTMLrec = tmpHTMLrec + newelement.replace("typename", item.entity_id).replace("removexxx", "removerec").replace("idxxx", item.entity_id).replace("idxxx", item.entity_id);
+                    const factorLabel = Number(item.calibration?.factor ?? 1).toFixed(2);
+                    const offsetLabel = Number(item.calibration?.offset ?? 0).toFixed(2);
+                    const recLabel = `${item.entity_id} (x${factorLabel}, ${offsetLabel}m)`;
+                    tmpHTMLrec = tmpHTMLrec + newelement.replace("typename", recLabel).replace("removexxx", "removerec").replace("idxxx", item.entity_id).replace("idxxx", item.entity_id);
                 }
             }
             if (item.type == "zone"){
@@ -1126,6 +1396,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else{
             document.getElementById('divzones').innerHTML = '<p class="text-sm text-gray-500">No zones drawn</p>';
         }
+        refreshCalibrationSelectors();
 
     }
 

@@ -151,6 +151,9 @@ async def update_tracked_entities(hass, jinja_code):
 async def update_receiver_radii(hass, eids):
     """Update receiver 'r' values for an entity"""
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
+        floor_scale = floor.get("scale")
+        if floor_scale is None:
+            continue
         for receiver in floor["receivers"]:
             entity_id = (
                 "sensor."
@@ -161,9 +164,17 @@ async def update_receiver_radii(hass, eids):
             rec_value = hass.states.get(entity_id)
             if rec_value is not None:
                 try:
-                    radius = floor["scale"] * float(rec_value.state)
+                    raw_distance = float(rec_value.state)
+                    calibration = receiver.get("calibration", {})
+                    cal_factor = float(calibration.get("factor", 1.0))
+                    cal_offset = float(calibration.get("offset", 0.0))
+
+                    corrected_distance = (raw_distance * cal_factor) + cal_offset
+                    corrected_distance = max(corrected_distance, 0.0)
+
+                    radius = float(floor_scale) * corrected_distance
                     receiver["cords"]["r"] = radius
-                except ValueError:
+                except (TypeError, ValueError):
                     # _LOGGER.info(f"Invalid numerical value: {rec_value.state}")
                     pass
             else:
@@ -275,26 +286,48 @@ async def process_entities(hass, new_global_data):
 
 
 def extract_floor_and_receivers(new_global_data, tmpentity):
-    """Find lowest floor and filter receiver cords."""
-    lowest_floor_name, lowest_r = None, float("inf")
-    filtered_cords = []
+    """Find floor with closest receiver and return explicit (x, y, r) points."""
+    floor_points = {}
+    floor_min_r = {}
 
     for entity in new_global_data:
-        if entity["entity"] == tmpentity:
-            for floor in entity["data"]["floor"]:
-                for receiver in floor["receivers"]:
-                    if "cords" in receiver and "r" in receiver["cords"]:
-                        r_value = receiver["cords"]["r"]
-                        if r_value < lowest_r:
-                            lowest_r, lowest_floor_name = (
-                                r_value,
-                                floor["name"],
-                            )
-                        if floor["name"] == lowest_floor_name:
-                            filtered_cords.append(
-                                tuple(receiver["cords"].values())
-                            )
-    return lowest_floor_name, filtered_cords
+        if entity["entity"] != tmpentity:
+            continue
+
+        for floor in entity["data"]["floor"]:
+            floor_name = floor.get("name")
+            if floor_name is None:
+                continue
+
+            points = []
+            min_r = float("inf")
+
+            for receiver in floor.get("receivers", []):
+                cords = receiver.get("cords", {})
+                x = cords.get("x")
+                y = cords.get("y")
+                r = cords.get("r")
+                if x is None or y is None or r is None:
+                    continue
+                try:
+                    r_val = float(r)
+                except (TypeError, ValueError):
+                    continue
+                if r_val <= 0:
+                    continue
+                points.append((float(x), float(y), r_val))
+                if r_val < min_r:
+                    min_r = r_val
+
+            if points:
+                floor_points[floor_name] = points
+                floor_min_r[floor_name] = min_r
+
+    if not floor_min_r:
+        return None, []
+
+    lowest_floor_name = min(floor_min_r, key=floor_min_r.get)
+    return lowest_floor_name, floor_points.get(lowest_floor_name, [])
 
 
 def find_zone_for_point(data, entity, floor_name, point):

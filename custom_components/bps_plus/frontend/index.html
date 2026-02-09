@@ -77,6 +77,34 @@
                 </div>
             </div>
             <div>
+                <h4 class="font-medium mb-2">Calibration</h4>
+                <div class="space-y-2">
+                    <select id="calReceiver" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base md:text-sm">
+                        <option value="">Receiver...</option>
+                    </select>
+                    <div class="flex gap-2">
+                        <input id="calFactor" type="number" step="0.01" placeholder="Factor" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base md:text-sm">
+                        <input id="calOffset" type="number" step="0.01" placeholder="Offset (m)" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base md:text-sm">
+                    </div>
+                    <button id="calSaveManual" type="button" class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2 w-full">
+                        Save Manual Calibration
+                    </button>
+                    <select id="calEntity" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base md:text-sm">
+                        <option value="">Device...</option>
+                    </select>
+                    <div class="flex gap-2">
+                        <input id="calMeasuredMeters" type="number" step="0.01" placeholder="Measured meters" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base md:text-sm">
+                        <button id="calCaptureSample" type="button" class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2">
+                            Capture
+                        </button>
+                    </div>
+                    <button id="calComputeAuto" type="button" class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2 w-full">
+                        Auto Calibrate
+                    </button>
+                    <p id="calStatus" class="text-sm text-gray-500">No calibration samples yet.</p>
+                </div>
+            </div>
+            <div>
                 <p id="scaleok" class="text-sm items-center justify-between text-gray-500 space-y-2 flex" style="display: none">Scale set
                     <svg width="24px" height="24px" fill="green" version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" xml:space="preserve">
                         <path d="M12,2C6.5,2,2,6.5,2,12s4.5,10,10,10s10-4.5,10-10S17.5,2,12,2z M10.8,16.8l-3.7-3.7l1.4-1.4l2.2,2.2l5.8-6.1L18,9.3L10.8,16.8z"/>
