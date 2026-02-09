@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.4] - 2026-02-09
+- Fixed realtime tracking auth UX by loading token/base URL from integration settings through new API:
+  - `GET /api/bps/frontend_config` (auth required),
+  - frontend now auto-builds websocket URL from configured `base_url`.
+- Added **Quitar marcador de posición** in Pro mode to remove/reposition the calibration marker at any time.
+- Kept cache-busting updated for frontend assets to reduce stale UI after updates.
+
 ## [1.5.3] - 2026-02-09
 - Final hardening pass for frontend stability:
   - added additional null-guards in calibration status handling to tolerate partial cache mismatches.

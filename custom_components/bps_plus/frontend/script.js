@@ -3,12 +3,13 @@
 //Click on security on the top of the page
 //In the bottom of the page, create a new token. The name does not matter
 //Copy the token and below
-//Example: const hass_token = "my_secret_token";
-const hass_token = "";
+//Example: let hass_token = "my_secret_token";
+let hass_token = "";
 // Add your url that you use in your browser
 //Example1: const hassURL = "xxx.duckdns.org";
 //Example2: const hassURL = "192.168.0.10:8123";
-const hassURL = "";
+let hassURL = "";
+let hassWSURL = "";
 
 document.addEventListener('DOMContentLoaded', async () => {
     const canvas = document.getElementById('canvas');
@@ -34,6 +35,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const wallPenaltySaveButton = document.getElementById('wallPenaltySave');
     const wallPenaltyPresetSelect = document.getElementById('wallPenaltyPreset');
     const calProPickPositionButton = document.getElementById('calProPickPosition');
+    const calProClearPositionButton = document.getElementById('calProClearPosition');
     const calProAutoButton = document.getElementById('calProAuto');
     const calProStatus = document.getElementById('calProStatus');
     const saveButton = document.createElement('button');
@@ -99,6 +101,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Fetch existing maps
     // =================================================================
 
+        function normalizeWebSocketUrl(rawBaseUrl) {
+            const raw = (rawBaseUrl || "").trim();
+            if (!raw) {
+                return "";
+            }
+            if (raw.startsWith("ws://") || raw.startsWith("wss://")) {
+                return `${raw.replace(/\/+$/, "")}/api/websocket`;
+            }
+            let urlCandidate = raw;
+            if (!/^https?:\/\//i.test(urlCandidate)) {
+                urlCandidate = `https://${urlCandidate}`;
+            }
+            try {
+                const parsed = new URL(urlCandidate);
+                const wsProtocol = parsed.protocol === "http:" ? "ws:" : "wss:";
+                return `${wsProtocol}//${parsed.host}/api/websocket`;
+            } catch (_err) {
+                const hostOnly = raw
+                    .replace(/^https?:\/\//i, "")
+                    .replace(/\/+$/, "");
+                return hostOnly ? `wss://${hostOnly}/api/websocket` : "";
+            }
+        }
+
+        async function loadFrontendConfig() {
+            try {
+                const response = await fetch("/api/bps/frontend_config");
+                if (!response.ok) {
+                    return;
+                }
+                const cfg = await response.json();
+                if (cfg && typeof cfg.token === "string" && cfg.token.trim()) {
+                    hass_token = cfg.token.trim();
+                }
+                if (cfg && typeof cfg.base_url === "string" && cfg.base_url.trim()) {
+                    hassURL = cfg.base_url.trim();
+                    hassWSURL = normalizeWebSocketUrl(hassURL);
+                }
+            } catch (_err) {
+                // Keep manual fallback values when endpoint is unavailable.
+            }
+        }
+
         async function getSavedMaps(){
             const mapsResponse = await fetch('/api/bps/maps');
             if (!mapsResponse.ok) {
@@ -119,6 +164,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         
     
+        await loadFrontendConfig();
+
         // Once the maps are loaded, call fetchBPSData
         let tmpsaved = await getSavedMaps();
         if (tmpsaved){
@@ -169,18 +216,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
-            if (!hass_token || !hassURL){
+            if (!hass_token || !hassWSURL){
                 let messageStr = "";
                 if (!hass_token){
-                    messageStr = "Debes añadir un token de larga duración";
+                    messageStr = "Debes añadir un token de larga duración en la configuración de la integración";
                 }
-                if (!hass_token && !hassURL){
-                    messageStr = messageStr+" y la URL de HA. Revisa la documentación.";
+                if (!hass_token && !hassWSURL){
+                    messageStr = messageStr+" y la URL de HA. Revisa la configuración de BPS-Plus.";
                     alert(messageStr);
                     return;
                 }
-                if (!hassURL){
-                    messageStr = "Debes añadir la URL de HA";
+                if (!hassWSURL){
+                    messageStr = "Debes añadir la URL de HA en la configuración de BPS-Plus";
                 }
                 alert(messageStr);
                 return;
@@ -211,7 +258,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
     
             console.log("open socket");
-            socket = new WebSocket("wss://"+hassURL+"/api/websocket");
+            socket = new WebSocket(hassWSURL);
             socket.onopen = () => {
                 // Send authentication
                 console.log("sending auth");
@@ -506,6 +553,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (wallPenaltySaveButton) wallPenaltySaveButton.addEventListener("click", saveWallPenalty);
         if (wallPenaltyPresetSelect) wallPenaltyPresetSelect.addEventListener("change", applyWallPenaltyPreset);
         if (calProPickPositionButton) calProPickPositionButton.addEventListener("click", startProPositionPick);
+        if (calProClearPositionButton) calProClearPositionButton.addEventListener("click", clearProPositionMarker);
         if (calProAutoButton) calProAutoButton.addEventListener("click", runProAutoCalibration);
     
     
@@ -670,6 +718,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         canvas.style.cursor = "crosshair";
         updateProStatus("Pro: haz clic en el mapa para marcar tu posición real.");
         canvas.addEventListener("click", handleProPositionClick);
+    }
+
+    function clearProPositionMarker() {
+        proCalibrationPoint = null;
+        proPickPositionPending = false;
+        canvas.removeEventListener("click", handleProPositionClick);
+        canvas.style.cursor = "";
+        updateProStatus("Pro: marcador eliminado. Marca una nueva posición cuando quieras.");
+        if (checkCanvasImage()) {
+            clearCanvas();
+            drawElements();
+        }
     }
 
     function handleProPositionClick(event) {

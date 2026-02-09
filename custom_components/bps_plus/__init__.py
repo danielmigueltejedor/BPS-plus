@@ -577,6 +577,7 @@ async def async_setup(hass: HomeAssistant, config):
             hass.http.register_view(BPSSaveAPIText())
             hass.http.register_view(BPSMapsListAPI())
             hass.http.register_view(BPSReadAPIText())
+            hass.http.register_view(BPSFrontendConfigAPI())
             hass.http.register_view(BPSDistanceValueAPI())
             hass.http.register_view(BPSCordsAPI(hass))
             hass.data[views_flag_key] = True
@@ -908,6 +909,41 @@ class BPSMapsListAPI(HomeAssistantView):
             return web.Response(
                 status=500, text="Error listing map files"
             )
+
+
+class BPSFrontendConfigAPI(HomeAssistantView):
+    """Expose frontend runtime config from config entry options."""
+
+    url = "/api/bps/frontend_config"
+    name = "api:bps:frontend_config"
+    requires_auth = True
+
+    async def get(self, request):
+        """Return base_url/token/update_interval for the panel frontend."""
+        hass = request.app["hass"]
+        entry = hass.data.get(DOMAIN, {}).get("config_entry")
+        if entry is None:
+            return web.json_response(
+                {
+                    "base_url": "",
+                    "token": "",
+                    "update_interval": DEFAULT_UPDATE_INTERVAL,
+                }
+            )
+
+        data = {**entry.data, **entry.options}
+        base_url = str(data.get(CONF_BASE_URL, "")).strip()
+        token = str(data.get(CONF_TOKEN, "")).strip()
+        update_interval = int(
+            data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        )
+        return web.json_response(
+            {
+                "base_url": base_url,
+                "token": token,
+                "update_interval": update_interval,
+            }
+        )
 
 
 class BPSDistanceValueAPI(HomeAssistantView):
