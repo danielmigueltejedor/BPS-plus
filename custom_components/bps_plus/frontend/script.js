@@ -598,12 +598,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function readStateValue(entityId) {
-        const response = await fetch(`/api/states/${entityId}`);
+        const response = await fetch(`/api/bps/distance?entity_id=${encodeURIComponent(entityId)}`);
         if (!response.ok) {
             throw new Error(`Cannot read ${entityId}: ${response.status}`);
         }
         const stateObj = await response.json();
-        const value = parseFloat(stateObj.state);
+        const value = parseFloat(stateObj.value);
         if (Number.isNaN(value)) {
             throw new Error(`State ${entityId} is not numeric`);
         }

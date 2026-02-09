@@ -504,6 +504,7 @@ async def async_setup(hass: HomeAssistant, config):
             hass.http.register_view(BPSSaveAPIText())
             hass.http.register_view(BPSMapsListAPI())
             hass.http.register_view(BPSReadAPIText())
+            hass.http.register_view(BPSDistanceValueAPI())
             hass.http.register_view(BPSCordsAPI(hass))
             hass.data[views_flag_key] = True
 
@@ -830,6 +831,46 @@ class BPSMapsListAPI(HomeAssistantView):
             return web.Response(
                 status=500, text="Error listing map files"
             )
+
+
+class BPSDistanceValueAPI(HomeAssistantView):
+    """Read one distance entity value without calling /api/states directly."""
+
+    url = "/api/bps/distance"
+    name = "api:bps:distance"
+    requires_auth = False
+
+    async def get(self, request):
+        """Return numeric value of a distance entity."""
+        hass = request.app["hass"]
+        entity_id = request.query.get("entity_id", "").strip()
+        if not entity_id:
+            return web.json_response(
+                {"error": "missing_entity_id"}, status=400
+            )
+
+        state = hass.states.get(entity_id)
+        if state is None:
+            return web.json_response(
+                {"error": "entity_not_found", "entity_id": entity_id},
+                status=404,
+            )
+
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return web.json_response(
+                {
+                    "error": "state_not_numeric",
+                    "entity_id": entity_id,
+                    "state": state.state,
+                },
+                status=422,
+            )
+
+        return web.json_response(
+            {"entity_id": entity_id, "value": value}
+        )
 
 
 class BPSCordsAPI(HomeAssistantView):
