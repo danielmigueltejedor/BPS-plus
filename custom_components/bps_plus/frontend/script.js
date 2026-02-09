@@ -597,8 +597,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         loadCalibrationInputsForSelectedReceiver();
     }
 
-    async function readStateValue(entityId) {
-        const response = await fetch(`/api/bps/distance?entity_id=${encodeURIComponent(entityId)}`);
+    async function readStateValue(entityId = "", targetId = "", receiverId = "") {
+        let query = "";
+        if (entityId) {
+            query = `entity_id=${encodeURIComponent(entityId)}`;
+        } else if (targetId && receiverId) {
+            query = `target_id=${encodeURIComponent(targetId)}&receiver_id=${encodeURIComponent(receiverId)}`;
+        } else {
+            throw new Error("Missing entity or target/receiver for readStateValue");
+        }
+
+        const response = await fetch(`/api/bps/distance?${query}`);
         if (!response.ok) {
             throw new Error(`Cannot read ${entityId}: ${response.status}`);
         }
@@ -662,7 +671,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         try {
-            const observed = await readStateValue(distanceEntity);
+            const observed = await readStateValue(distanceEntity, deviceId, receiverId);
             if (!calibrationSamples[receiverId]) {
                 calibrationSamples[receiverId] = [];
             }

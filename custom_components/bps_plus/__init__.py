@@ -171,6 +171,24 @@ def discover_distance_entities(hass: HomeAssistant):
     return canonical_map, entity_options, target_metadata
 
 
+def find_managed_distance_state(
+    hass: HomeAssistant, target_id: str, receiver_id: str
+):
+    """Find BPS-managed distance sensor state for target/receiver pair."""
+    for state in hass.states.async_all():
+        if not state.entity_id.startswith("sensor."):
+            continue
+        attrs = state.attributes
+        if attrs.get("managed_by") != DOMAIN:
+            continue
+        if (
+            attrs.get("target_id") == target_id
+            and attrs.get("receiver_id") == receiver_id
+        ):
+            return state
+    return None
+
+
 class FileWatcher(FileSystemEventHandler):
     """A class to handle file changes"""
 
@@ -844,15 +862,37 @@ class BPSDistanceValueAPI(HomeAssistantView):
         """Return numeric value of a distance entity."""
         hass = request.app["hass"]
         entity_id = request.query.get("entity_id", "").strip()
-        if not entity_id:
-            return web.json_response(
-                {"error": "missing_entity_id"}, status=400
+        target_id = request.query.get("target_id", "").strip()
+        receiver_id = request.query.get("receiver_id", "").strip()
+
+        if not entity_id and target_id and receiver_id:
+            canonical_map, _, _ = discover_distance_entities(hass)
+            entity_id = canonical_map.get(target_id, {}).get(
+                receiver_id, ""
             )
 
-        state = hass.states.get(entity_id)
+        state = hass.states.get(entity_id) if entity_id else None
+        if state is None and target_id and receiver_id:
+            state = find_managed_distance_state(
+                hass, target_id, receiver_id
+            )
+            if state is not None:
+                entity_id = state.entity_id
+
+        if state is None and not entity_id and not (target_id and receiver_id):
+            return web.json_response(
+                {"error": "missing_entity_id_or_target_receiver"},
+                status=400,
+            )
+
         if state is None:
             return web.json_response(
-                {"error": "entity_not_found", "entity_id": entity_id},
+                {
+                    "error": "entity_not_found",
+                    "entity_id": entity_id,
+                    "target_id": target_id,
+                    "receiver_id": receiver_id,
+                },
                 status=404,
             )
 
