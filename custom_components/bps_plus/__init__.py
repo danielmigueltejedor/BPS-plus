@@ -149,12 +149,23 @@ def discover_distance_entities(hass: HomeAssistant):
 
     canonical_map: dict[str, dict[str, str]] = {}
     for state in hass.states.async_all():
-        if not state.entity_id.startswith("sensor.") or "_distance_to_" not in state.entity_id:
+        if (
+            not state.entity_id.startswith("sensor.")
+            or "_distance_to_" not in state.entity_id
+        ):
             continue
+
+        # Ignore BPS-owned entities to prevent recursive self-discovery loops.
+        if state.attributes.get("managed_by") == DOMAIN:
+            continue
+
         parts = extract_distance_entity_parts(state.entity_id)
         if not parts:
             continue
         raw_target, receiver = parts
+        if "_distance_to_" in raw_target:
+            # Guard against malformed chained ids produced by previous loops.
+            continue
         canonical_target = canonical_target_token(raw_target, current_to_source)
         canonical_map.setdefault(canonical_target, {})[receiver] = state.entity_id
 
