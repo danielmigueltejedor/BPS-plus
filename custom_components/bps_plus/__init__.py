@@ -132,6 +132,19 @@ def canonical_target_token(raw_target: str, current_to_source: dict[str, str]) -
     return raw_target
 
 
+def collapse_repeated_target(target: str) -> str:
+    """Collapse recursively repeated targets: a_b_a_b -> a_b."""
+    current = target
+    while True:
+        parts = current.split("_")
+        if len(parts) < 2 or len(parts) % 2 != 0:
+            return current
+        half = len(parts) // 2
+        if parts[:half] != parts[half:]:
+            return current
+        current = "_".join(parts[:half])
+
+
 def extract_distance_entity_parts(entity_id: str) -> tuple[str, str] | None:
     """Return (target, receiver) from sensor.target_distance_to_receiver."""
     cleaned = entity_id.replace("sensor.", "", 1)
@@ -146,6 +159,12 @@ def extract_distance_entity_parts(entity_id: str) -> tuple[str, str] | None:
 def discover_distance_entities(hass: HomeAssistant):
     """Discover distance entities with canonical target mapping and metadata."""
     current_to_source, target_metadata = build_bluetooth_alias_maps(hass)
+    entity_registry = er.async_get(hass)
+    bps_owned_entities = {
+        entry.entity_id
+        for entry in entity_registry.entities.values()
+        if entry.platform == DOMAIN
+    }
 
     canonical_map: dict[str, dict[str, str]] = {}
     for state in hass.states.async_all():
@@ -158,6 +177,8 @@ def discover_distance_entities(hass: HomeAssistant):
         # Ignore BPS-owned entities to prevent recursive self-discovery loops.
         if state.attributes.get("managed_by") == DOMAIN:
             continue
+        if state.entity_id in bps_owned_entities:
+            continue
 
         parts = extract_distance_entity_parts(state.entity_id)
         if not parts:
@@ -167,6 +188,7 @@ def discover_distance_entities(hass: HomeAssistant):
             # Guard against malformed chained ids produced by previous loops.
             continue
         canonical_target = canonical_target_token(raw_target, current_to_source)
+        canonical_target = collapse_repeated_target(canonical_target)
         # Defensive limits to avoid creating runaway entities from malformed ids.
         if len(canonical_target) > 80 or len(receiver) > 80:
             continue

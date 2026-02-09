@@ -46,6 +46,14 @@ def _is_valid_id(value: str) -> bool:
     return bool(value) and len(value) <= 80 and re.fullmatch(r"[a-z0-9_]+", value) is not None
 
 
+def _looks_repeated(value: str) -> bool:
+    parts = value.split("_")
+    if len(parts) < 2 or len(parts) % 2 != 0:
+        return False
+    half = len(parts) // 2
+    return parts[:half] == parts[half:]
+
+
 def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
     """Remove legacy malformed BPS-managed sensors from entity registry."""
     entity_registry = er.async_get(hass)
@@ -59,7 +67,12 @@ def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
             continue
         target_id = attrs.get("target_id", "")
         receiver_id = attrs.get("receiver_id", "")
-        if _is_valid_id(str(target_id)) and _is_valid_id(str(receiver_id)):
+        if (
+            _is_valid_id(str(target_id))
+            and _is_valid_id(str(receiver_id))
+            and not _looks_repeated(str(target_id))
+            and not _looks_repeated(str(receiver_id))
+        ):
             continue
 
         if entity_registry.async_get(state.entity_id) is not None:
@@ -169,8 +182,12 @@ async def async_setup_entry(
         for target_id in target_ids_with_data:
             if not _is_valid_id(target_id):
                 continue
+            if _looks_repeated(target_id):
+                continue
             for receiver_id in receivers:
                 if not _is_valid_id(receiver_id):
+                    continue
+                if _looks_repeated(receiver_id):
                     continue
                 key = f"{target_id}__{receiver_id}"
                 if key in managed:

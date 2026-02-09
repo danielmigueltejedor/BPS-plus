@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.5] - 2026-02-09
+- Added additional anti-loop hardening in BLE discovery:
+  - ignores all entities owned by `bps_plus` via entity registry platform lookup,
+  - collapses recursively repeated target ids,
+  - rejects malformed/oversized ids.
+- Added stricter creation guards in `sensor.py` to skip repeated/invalid target and receiver ids.
+- Added cleanup for malformed legacy managed entities to reduce startup load after previous loop incidents.
+- Added refresh throttling/debounce to reduce event storms and websocket saturation risk.
+- Optimized discovery by reading entity-registry ownership once per cycle instead of per entity.
+
 ## [1.3.4] - 2026-02-09
 - Fixed critical recursive entity-generation loop that could saturate Home Assistant Core.
 - Added strict filtering in BLE discovery to ignore BPS-managed entities and malformed chained IDs.
