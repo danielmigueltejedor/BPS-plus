@@ -836,13 +836,17 @@ class BPSMapsListAPI(HomeAssistantView):
         maps_path = hass.config.path("www/bps_maps")
 
         try:
-            files = [
-                f
-                for f in os.scandir(maps_path)
-                if f.is_file()
-                and f.name.lower().endswith((".png", ".jpg"))
-            ]
-            file_names = [f.name for f in files]
+            def _scan_map_files(path: str) -> list[str]:
+                return [
+                    f.name
+                    for f in os.scandir(path)
+                    if f.is_file()
+                    and f.name.lower().endswith((".png", ".jpg"))
+                ]
+
+            file_names = await hass.async_add_executor_job(
+                _scan_map_files, maps_path
+            )
             return web.json_response(file_names)
         except Exception as e:
             _LOGGER.error(f"Error listing map files: {e}")
