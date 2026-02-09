@@ -149,7 +149,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 alert("You must choose a device to track!");
                 return;
             }
-            let floor = finalcords.floor.find(floor => floor.name === SelMapName);
+            tracked.length = 0;
+            let floor = getCurrentFloor();
+            if (!floor) {
+                alert("Select a valid floor before starting tracking.");
+                return;
+            }
             floor.receivers.forEach((entity, index) => {
                 tracked.push(`${device}_distance_to_${entity.entity_id}`);
             });
@@ -259,7 +264,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                 }
                 let apiresponse = await fetchBPSCords();
+                if (!Array.isArray(apiresponse)) {
+                    return;
+                }
                 let result = apiresponse.find(item => item.ent === device.replace("sensor.",""));
+                if (!result || !Array.isArray(result.cords) || result.cords.length < 2) {
+                    return;
+                }
                 let dt = {x: result.cords[0], y:result.cords[1]};
                 drawTracker(dt);
                 zonediv.style.display = "";
@@ -272,7 +283,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         starttrackbtn.addEventListener("click", function() {
-            if (isChecked = document.getElementById("myCheckbox").checked) {
+            stoptrackbtn.removeEventListener("click", stopTracking);
+            stoptrackbtn.removeEventListener("click", stoptrackfunc);
+            if (document.getElementById("myCheckbox").checked) {
                 startTracking();
                 stoptrackbtn.addEventListener("click", stopTracking);
             } else {
@@ -286,12 +299,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             let index = NewEnts.findIndex(item => item.eid === newEid);
             if (state !== 'unknown') {
                 
-                let floor = finalcords.floor.find(floor => floor.name === SelMapName);
+                let floor = getCurrentFloor();
+                if (!floor) {
+                    return;
+                }
                 let rec = floor.receivers.find(element => element.entity_id === newEid);
                 if (!rec) {
                     return;
                 }
-                const correctedMeters = getCalibratedDistance(parseFloat(state), rec);
+                const rawDistance = parseFloat(state);
+                if (Number.isNaN(rawDistance)) {
+                    return;
+                }
+                const correctedMeters = getCalibratedDistance(rawDistance, rec);
                 if (index !== -1) {
                     //The entity exists, update
                     NewEnts.splice(index, 1, {
@@ -437,10 +457,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function getCurrentFloor() {
-        if (!SelMapName) {
+        const floorName = (SelMapName || mapname.value || "").trim();
+        if (!floorName) {
             return null;
         }
-        return finalcords.floor.find(floor => floor.name === SelMapName) || null;
+        SelMapName = floorName;
+        return finalcords.floor.find(floor => floor.name === floorName) || null;
     }
 
     function ensureReceiverCalibration(receiver) {
@@ -510,6 +532,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         if (previousReceiver) {
             calReceiverSelect.value = previousReceiver;
+        } else if (floor && floor.receivers.length > 0) {
+            calReceiverSelect.value = floor.receivers[0].entity_id;
         }
 
         calEntitySelect.innerHTML = '<option value="">Device...</option>';
@@ -522,6 +546,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         if (previousEntity) {
             calEntitySelect.value = previousEntity;
+        } else if (calEntitySelect.options.length > 1) {
+            calEntitySelect.selectedIndex = 1;
         }
 
         loadCalibrationInputsForSelectedReceiver();
@@ -544,7 +570,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const floor = getCurrentFloor();
         const receiverId = calReceiverSelect.value;
         if (!floor || !receiverId) {
-            alert("Select floor and receiver first.");
+            alert("Select a floor/map and receiver first.");
             return;
         }
 
@@ -578,7 +604,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const measuredMeters = parseFloat(calMeasuredMetersInput.value);
 
         if (!floor || !receiverId || !deviceId) {
-            alert("Choose receiver and device first.");
+            alert("Choose floor/map, receiver and device first.");
             return;
         }
         if (Number.isNaN(measuredMeters) || measuredMeters <= 0) {
@@ -1090,7 +1116,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        const scaleInput = parseFloat(scaleValue.value);
+        const scaleInput = parseFloat(scaleInputElement?.value || "");
         if (isNaN(scaleInput) || scaleInput <= 0) {
             alert("Please enter the actual length in meters.");
             return;
@@ -1513,10 +1539,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     //When clicking the delete button, remove the floor and reset the canvas.
     deleteButton.addEventListener("click", async function () {
         const userConfirmed = confirm("Are you sure you want to remove the floor named "+SelMapName+"?");
-        let tmpfinal = finalcords; //Save the array to a temporary
-        finalcords.floor = finalcords.floor.filter(floor => floor.name !== SelMapName); // Remove the selected floor
+        let tmpfinal = JSON.parse(JSON.stringify(finalcords)); //Save the array to a temporary
 
         if (userConfirmed) {
+            finalcords.floor = finalcords.floor.filter(floor => floor.name !== SelMapName); // Remove the selected floor
             removefile = true;
             let saveresult = await savedata();
             if(saveresult){
@@ -1530,6 +1556,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         } else {
             alert("Action canceled. No changes were made.");
+            finalcords = tmpfinal;
         }
     });
 
