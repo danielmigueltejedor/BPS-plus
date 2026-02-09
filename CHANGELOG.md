@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.3] - 2026-02-09
+- Final hardening pass for frontend stability:
+  - added additional null-guards in calibration status handling to tolerate partial cache mismatches.
+- Added cache-busting to both frontend assets in `index.html`:
+  - `bpsstyle.css?v=1.5.3`
+  - `script.js?v=1.5.3`
+- Keeps Modo Pro (beta), wall drawing and full Spanish UI active after forced refresh.
+
+## [1.5.2] - 2026-02-09
+- Added **Modo Pro (beta)** in frontend calibration:
+  - mark real position on map (person marker),
+  - 15-second multi-proxy auto-capture,
+  - automatic per-receiver recalibration from captured samples,
+  - guidance message listing proxies still pending calibration.
+- Added frontend cache-busting for `script.js` to reduce stale UI issues after updates.
+- Added null-safe guards in calibration controls to avoid frontend crashes on partial cache mismatches.
+
 ## [1.5.1] - 2026-02-09
 - Added wall-penalty presets in UI for faster setup:
   - open space, light partition, standard partition, brick, concrete, concrete+metal.

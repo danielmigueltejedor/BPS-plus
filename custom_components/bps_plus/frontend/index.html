@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>BPS</title>
-    <link rel="stylesheet" href="bpsstyle.css">
+    <link rel="stylesheet" href="bpsstyle.css?v=1.5.3">
 </head>
 <body>
     <div class="container bg-gray-50">
@@ -122,6 +122,14 @@
                         <option value="4.5">Muro/hormigón (4.5 m)</option>
                         <option value="6.0">Muro + caja metálica (6.0 m)</option>
                     </select>
+                    <label class="text-sm font-medium leading-none">Modo Pro (beta)</label>
+                    <button id="calProPickPosition" type="button" class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2 w-full">
+                        Marcar mi posición en el mapa
+                    </button>
+                    <button id="calProAuto" type="button" class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2 w-full">
+                        Autocalibración Pro (15s)
+                    </button>
+                    <p id="calProStatus" class="text-sm text-gray-500">Pro: pendiente de marcar posición.</p>
                     <p id="calStatus" class="text-sm text-gray-500">Sin muestras de calibración.</p>
                 </div>
             </div>
@@ -144,6 +152,6 @@
         </div>
     </div>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=1.5.3"></script>
 </body>
 </html>

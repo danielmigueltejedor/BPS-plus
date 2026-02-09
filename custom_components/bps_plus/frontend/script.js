@@ -33,6 +33,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const wallPenaltyInput = document.getElementById('wallPenalty');
     const wallPenaltySaveButton = document.getElementById('wallPenaltySave');
     const wallPenaltyPresetSelect = document.getElementById('wallPenaltyPreset');
+    const calProPickPositionButton = document.getElementById('calProPickPosition');
+    const calProAutoButton = document.getElementById('calProAuto');
+    const calProStatus = document.getElementById('calProStatus');
     const saveButton = document.createElement('button');
 
     //Delete button
@@ -76,6 +79,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     let discoveredReceivers = [];
     let wallStartPoint = null;
     const wallPenaltyPresets = [0.8, 1.6, 2.5, 3.4, 4.5, 6.0];
+    let proCalibrationPoint = null;
+    let proPickPositionPending = false;
 
     const newelement = `
                 <ul class="space-y-2" id="idxxx">
@@ -490,14 +495,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
 
-        calReceiverSelect.addEventListener("change", loadCalibrationInputsForSelectedReceiver);
-        calSaveManualButton.addEventListener("click", saveManualCalibration);
-        calCaptureSampleButton.addEventListener("click", async () => {
-            await captureCalibrationSample();
-        });
-        calComputeAutoButton.addEventListener("click", computeAutoCalibration);
-        wallPenaltySaveButton.addEventListener("click", saveWallPenalty);
-        wallPenaltyPresetSelect.addEventListener("change", applyWallPenaltyPreset);
+        if (calReceiverSelect) calReceiverSelect.addEventListener("change", loadCalibrationInputsForSelectedReceiver);
+        if (calSaveManualButton) calSaveManualButton.addEventListener("click", saveManualCalibration);
+        if (calCaptureSampleButton) {
+            calCaptureSampleButton.addEventListener("click", async () => {
+                await captureCalibrationSample();
+            });
+        }
+        if (calComputeAutoButton) calComputeAutoButton.addEventListener("click", computeAutoCalibration);
+        if (wallPenaltySaveButton) wallPenaltySaveButton.addEventListener("click", saveWallPenalty);
+        if (wallPenaltyPresetSelect) wallPenaltyPresetSelect.addEventListener("change", applyWallPenaltyPreset);
+        if (calProPickPositionButton) calProPickPositionButton.addEventListener("click", startProPositionPick);
+        if (calProAutoButton) calProAutoButton.addEventListener("click", runProAutoCalibration);
     
     
     // Check if the image is loaded in the canvas
@@ -569,6 +578,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function refreshCalibrationStatus() {
+        if (!calStatus || !calReceiverSelect) {
+            return;
+        }
         const receiverId = calReceiverSelect.value;
         const samples = calibrationSamples[receiverId] || [];
         const sampleText = samples.length > 0 ? `Muestras: ${samples.length}` : "Sin muestras de calibración.";
@@ -576,6 +588,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function loadWallPenaltyForCurrentFloor() {
+        if (!wallPenaltyInput || !wallPenaltyPresetSelect) {
+            return;
+        }
         const floor = getCurrentFloor();
         if (!floor) {
             wallPenaltyInput.value = "";
@@ -601,6 +616,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function applyWallPenaltyPreset() {
+        if (!wallPenaltyPresetSelect || !wallPenaltyInput) {
+            return;
+        }
         const selected = parseFloat(wallPenaltyPresetSelect.value);
         if (!Number.isFinite(selected)) {
             return;
@@ -609,6 +627,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function saveWallPenalty() {
+        if (!wallPenaltyInput) {
+            return;
+        }
         const floor = getCurrentFloor();
         if (!floor) {
             alert("Selecciona primero una planta.");
@@ -620,12 +641,184 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         floor.wall_penalty = penalty;
-        wallPenaltyPresetSelect.value = matchPenaltyPreset(penalty);
+        if (wallPenaltyPresetSelect) {
+            wallPenaltyPresetSelect.value = matchPenaltyPreset(penalty);
+        }
         savebuttondiv.appendChild(saveButton);
-        calStatus.textContent = `Penalización por pared guardada: ${penalty.toFixed(2)} m`;
+        if (calStatus) {
+            calStatus.textContent = `Penalización por pared guardada: ${penalty.toFixed(2)} m`;
+        }
+    }
+
+    function updateProStatus(message) {
+        if (!calProStatus) {
+            return;
+        }
+        calProStatus.textContent = message;
+    }
+
+    function startProPositionPick() {
+        const floor = getCurrentFloor();
+        if (!floor) {
+            alert("Selecciona primero una planta/mapa.");
+            return;
+        }
+        if (!checkCanvasImage()) return;
+        removeListeners();
+        buttonreset();
+        proPickPositionPending = true;
+        canvas.style.cursor = "crosshair";
+        updateProStatus("Pro: haz clic en el mapa para marcar tu posición real.");
+        canvas.addEventListener("click", handleProPositionClick);
+    }
+
+    function handleProPositionClick(event) {
+        if (!proPickPositionPending) {
+            return;
+        }
+        const floor = getCurrentFloor();
+        if (!floor) {
+            return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        proCalibrationPoint = {
+            floor: floor.name,
+            x: (event.clientX - rect.left) * scaleX,
+            y: (event.clientY - rect.top) * scaleY,
+        };
+        proPickPositionPending = false;
+        canvas.style.cursor = "";
+        canvas.removeEventListener("click", handleProPositionClick);
+        updateProStatus(
+            `Pro: posición marcada en (${proCalibrationPoint.x.toFixed(0)}, ${proCalibrationPoint.y.toFixed(0)}).`
+        );
+        clearCanvas();
+        drawElements();
+    }
+
+    function computeAutoCalibrationForSamples(samples) {
+        let factor = 1;
+        let offset = 0;
+        if (!samples || samples.length === 0) {
+            return null;
+        }
+        if (samples.length === 1) {
+            const only = samples[0];
+            factor = only.measured / only.observed;
+        } else {
+            const n = samples.length;
+            const sumX = samples.reduce((acc, s) => acc + s.observed, 0);
+            const sumY = samples.reduce((acc, s) => acc + s.measured, 0);
+            const sumXY = samples.reduce((acc, s) => acc + (s.observed * s.measured), 0);
+            const sumXX = samples.reduce((acc, s) => acc + (s.observed * s.observed), 0);
+            const denominator = (n * sumXX) - (sumX * sumX);
+            if (Math.abs(denominator) < 1e-9) {
+                factor = samples.reduce((acc, s) => acc + (s.measured / s.observed), 0) / n;
+                offset = 0;
+            } else {
+                factor = ((n * sumXY) - (sumX * sumY)) / denominator;
+                offset = (sumY - (factor * sumX)) / n;
+            }
+        }
+        if (!Number.isFinite(factor) || factor <= 0) {
+            return null;
+        }
+        if (!Number.isFinite(offset)) {
+            offset = 0;
+        }
+        return { factor, offset };
+    }
+
+    function getRealDistanceMeters(point, receiver, floor) {
+        const dx = Number(receiver.cords?.x) - Number(point.x);
+        const dy = Number(receiver.cords?.y) - Number(point.y);
+        const pixelDistance = Math.sqrt((dx * dx) + (dy * dy));
+        return pixelDistance / Number(floor.scale);
+    }
+
+    function delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function runProAutoCalibration() {
+        const floor = getCurrentFloor();
+        const deviceId = calEntitySelect?.value || "";
+        if (!floor || !Number.isFinite(Number(floor.scale)) || Number(floor.scale) <= 0) {
+            alert("Necesitas una planta con escala configurada.");
+            return;
+        }
+        if (!deviceId) {
+            alert("Selecciona un dispositivo en Calibración para usar Modo Pro.");
+            return;
+        }
+        if (!proCalibrationPoint || proCalibrationPoint.floor !== floor.name) {
+            alert("Primero marca tu posición real en este mapa.");
+            return;
+        }
+        updateProStatus("Pro: capturando durante 15 segundos... espera sin moverte.");
+
+        const sessionCaptured = new Set();
+        const receivers = floor.receivers || [];
+
+        for (let t = 0; t < 15; t++) {
+            await Promise.all(
+                receivers.map(async (receiver) => {
+                    const receiverId = receiver.entity_id;
+                    try {
+                        const observed = await readStateValue("", deviceId, receiverId);
+                        if (!Number.isFinite(observed) || observed <= 0) {
+                            return;
+                        }
+                        const measured = getRealDistanceMeters(proCalibrationPoint, receiver, floor);
+                        if (!Number.isFinite(measured) || measured <= 0) {
+                            return;
+                        }
+                        calibrationSamples[receiverId] = calibrationSamples[receiverId] || [];
+                        calibrationSamples[receiverId].push({ observed, measured });
+                        sessionCaptured.add(receiverId);
+                    } catch (err) {
+                        // Receiver/device pair has no readable value in this snapshot.
+                    }
+                })
+            );
+            updateProStatus(`Pro: capturando... ${t + 1}/15 s`);
+            await delay(1000);
+        }
+
+        let calibratedCount = 0;
+        receivers.forEach((receiver) => {
+            const samples = calibrationSamples[receiver.entity_id] || [];
+            const result = computeAutoCalibrationForSamples(samples);
+            if (!result) {
+                return;
+            }
+            receiver.calibration = {
+                factor: result.factor,
+                offset: result.offset,
+            };
+            calibratedCount += 1;
+        });
+
+        const missingNow = receivers
+            .map(r => r.entity_id)
+            .filter(id => !sessionCaptured.has(id));
+        savebuttondiv.appendChild(saveButton);
+        drawElements();
+        if (missingNow.length > 0) {
+            updateProStatus(
+                `Pro: calibrados ${calibratedCount}/${receivers.length}. Mueve el móvil hacia: ${missingNow.join(", ")} y repite.`
+            );
+        } else {
+            updateProStatus(`Pro: calibración completada para ${calibratedCount}/${receivers.length} receptores.`);
+        }
     }
 
     function loadCalibrationInputsForSelectedReceiver() {
+        if (!calReceiverSelect || !calFactorInput || !calOffsetInput) {
+            return;
+        }
         const floor = getCurrentFloor();
         if (!floor || !calReceiverSelect.value) {
             calFactorInput.value = "";
@@ -649,6 +842,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function refreshCalibrationSelectors() {
+        if (!calReceiverSelect || !calEntitySelect) {
+            return;
+        }
         const floor = getCurrentFloor();
         const previousReceiver = calReceiverSelect.value;
         const previousEntity = calEntitySelect.value;
@@ -736,7 +932,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         receiver.calibration = { factor, offset };
         savebuttondiv.appendChild(saveButton);
         drawElements();
-        calStatus.textContent = `Calibración manual guardada para ${receiverId}.`;
+        if (calStatus) {
+            calStatus.textContent = `Calibración manual guardada para ${receiverId}.`;
+        }
     }
 
     async function captureCalibrationSample() {
@@ -769,7 +967,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 measured: measuredMeters,
             });
             refreshCalibrationStatus();
-            calStatus.textContent = `Muestra ${calibrationSamples[receiverId].length}: observado ${observed.toFixed(2)} m, real ${measuredMeters.toFixed(2)} m.`;
+            if (calStatus) {
+                calStatus.textContent = `Muestra ${calibrationSamples[receiverId].length}: observado ${observed.toFixed(2)} m, real ${measuredMeters.toFixed(2)} m.`;
+            }
             calMeasuredMetersInput.value = "";
         } catch (err) {
             console.error("Calibration capture error:", err);
@@ -789,35 +989,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             alert("Captura al menos una muestra primero.");
             return;
         }
-
-        let factor = 1;
-        let offset = 0;
-        if (samples.length === 1) {
-            const only = samples[0];
-            factor = only.measured / only.observed;
-        } else {
-            const n = samples.length;
-            const sumX = samples.reduce((acc, s) => acc + s.observed, 0);
-            const sumY = samples.reduce((acc, s) => acc + s.measured, 0);
-            const sumXY = samples.reduce((acc, s) => acc + (s.observed * s.measured), 0);
-            const sumXX = samples.reduce((acc, s) => acc + (s.observed * s.observed), 0);
-
-            const denominator = (n * sumXX) - (sumX * sumX);
-            if (Math.abs(denominator) < 1e-9) {
-                factor = samples.reduce((acc, s) => acc + (s.measured / s.observed), 0) / n;
-                offset = 0;
-            } else {
-                factor = ((n * sumXY) - (sumX * sumY)) / denominator;
-                offset = (sumY - (factor * sumX)) / n;
-            }
-        }
-
-        if (!Number.isFinite(factor) || factor <= 0) {
+        const result = computeAutoCalibrationForSamples(samples);
+        if (!result) {
             alert("El factor calculado no es válido. Captura muestras más limpias.");
             return;
-        }
-        if (!Number.isFinite(offset)) {
-            offset = 0;
         }
 
         const receiver = floor.receivers.find(r => r.entity_id === receiverId);
@@ -826,12 +1001,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        receiver.calibration = { factor, offset };
-        calFactorInput.value = factor.toFixed(3);
-        calOffsetInput.value = offset.toFixed(3);
+        receiver.calibration = { factor: result.factor, offset: result.offset };
+        calFactorInput.value = result.factor.toFixed(3);
+        calOffsetInput.value = result.offset.toFixed(3);
         savebuttondiv.appendChild(saveButton);
         drawElements();
-        calStatus.textContent = `Autocalibración aplicada a ${receiverId}: factor ${factor.toFixed(3)}, offset ${offset.toFixed(3)}.`;
+        if (calStatus) {
+            calStatus.textContent = `Autocalibración aplicada a ${receiverId}: factor ${result.factor.toFixed(3)}, offset ${result.offset.toFixed(3)}.`;
+        }
     }
 
     // Remove all listeners
@@ -843,6 +1020,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         canvas.removeEventListener("mouseup", endDrawingScale);
         canvas.removeEventListener('click', placeReceiver);
         canvas.removeEventListener("click", handleWallClick);
+        canvas.removeEventListener("click", handleProPositionClick);
+        canvas.style.cursor = "";
+        proPickPositionPending = false;
     }
 
     //Reset all buttons
@@ -966,6 +1146,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         buttonreset();
         mapSelector.selectedIndex = 0;
         refreshCalibrationSelectors();
+        updateProStatus("Pro: pendiente de marcar posición.");
     });
 
     function clearCanvas(){
@@ -1682,6 +1863,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 `;
             }
         });
+
+        if (proCalibrationPoint && proCalibrationPoint.floor === SelMapName) {
+            const markerSize = canvas.width * 0.035;
+            const px = proCalibrationPoint.x;
+            const py = proCalibrationPoint.y;
+            const icon = new Image();
+            icon.src = "person.svg";
+            icon.onload = () => {
+                ctx.drawImage(icon, px - markerSize / 2, py - markerSize / 2, markerSize, markerSize);
+            };
+        }
+
         if(tmpHTMLrec !== ""){
             document.getElementById('divrec').innerHTML = tmpHTMLrec;
         } else{
@@ -1710,6 +1903,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         await setupCanvasWithImage(img, canvas);
         new_floor = false;
         drawElements();
+        if (proCalibrationPoint && proCalibrationPoint.floor === SelMapName) {
+            updateProStatus("Pro: posición real marcada para esta planta.");
+        } else {
+            updateProStatus("Pro: pendiente de marcar posición.");
+        }
     });
 
     upload.addEventListener('change', event => {
