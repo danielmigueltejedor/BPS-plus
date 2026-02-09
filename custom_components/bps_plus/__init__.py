@@ -4,6 +4,7 @@ import logging
 import asyncio
 import os
 import json
+import re
 from pathlib import Path
 from asyncio import Lock, Queue, wait_for, TimeoutError
 
@@ -59,6 +60,98 @@ tracked_entities = []
 new_global_data = {}
 secToUpdate = 1
 apitricords = []
+
+
+def normalize_mac(value: str | None) -> str | None:
+    """Normalize MAC-like value to AA:BB:CC:DD:EE:FF."""
+    if not value:
+        return None
+    candidate = value.strip().upper().replace("-", ":").replace("_", ":")
+    if re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", candidate):
+        return candidate
+    compact = re.sub(r"[^0-9A-F]", "", candidate)
+    if re.fullmatch(r"[0-9A-F]{12}", compact):
+        return ":".join(compact[i : i + 2] for i in range(0, 12, 2))
+    return None
+
+
+def mac_to_entity_token(mac: str) -> str:
+    """Convert AA:BB:CC:DD:EE:FF -> aa_bb_cc_dd_ee_ff for entity-safe ids."""
+    return mac.lower().replace(":", "_")
+
+
+def build_bluetooth_alias_maps(hass: HomeAssistant):
+    """Build maps for private BLE addresses -> stable address/friendly name."""
+    current_to_source: dict[str, str] = {}
+    target_metadata: dict[str, dict[str, str]] = {}
+
+    for state in hass.states.async_all():
+        attrs = state.attributes
+        if attrs.get("source_type") != "bluetooth_le":
+            continue
+
+        current_address = normalize_mac(attrs.get("current_address"))
+        source_address = normalize_mac(attrs.get("source"))
+        friendly_name = attrs.get("friendly_name") or state.name or state.entity_id
+
+        if not current_address:
+            continue
+
+        stable_address = source_address or current_address
+        current_to_source[current_address] = stable_address
+
+        stable_token = mac_to_entity_token(stable_address)
+        target_metadata[stable_token] = {
+            "friendly_name": str(friendly_name),
+            "stable_address": stable_address,
+            "current_address": current_address,
+        }
+
+    return current_to_source, target_metadata
+
+
+def canonical_target_token(raw_target: str, current_to_source: dict[str, str]) -> str:
+    """Convert raw _distance_to_ target token to stable token when possible."""
+    maybe_mac = normalize_mac(raw_target)
+    if maybe_mac:
+        stable = current_to_source.get(maybe_mac, maybe_mac)
+        return mac_to_entity_token(stable)
+    return raw_target
+
+
+def extract_distance_entity_parts(entity_id: str) -> tuple[str, str] | None:
+    """Return (target, receiver) from sensor.target_distance_to_receiver."""
+    cleaned = entity_id.replace("sensor.", "", 1)
+    if "_distance_to_" not in cleaned:
+        return None
+    target, receiver = cleaned.split("_distance_to_", 1)
+    if not target or not receiver:
+        return None
+    return target, receiver
+
+
+def discover_distance_entities(hass: HomeAssistant):
+    """Discover distance entities with canonical target mapping and metadata."""
+    current_to_source, target_metadata = build_bluetooth_alias_maps(hass)
+
+    canonical_map: dict[str, dict[str, str]] = {}
+    for state in hass.states.async_all():
+        if not state.entity_id.startswith("sensor.") or "_distance_to_" not in state.entity_id:
+            continue
+        parts = extract_distance_entity_parts(state.entity_id)
+        if not parts:
+            continue
+        raw_target, receiver = parts
+        canonical_target = canonical_target_token(raw_target, current_to_source)
+        canonical_map.setdefault(canonical_target, {})[receiver] = state.entity_id
+
+    entity_options = []
+    for target_id in sorted(canonical_map):
+        metadata = target_metadata.get(target_id, {})
+        name = metadata.get("friendly_name", target_id)
+        entity_options.append({"id": target_id, "name": name})
+
+    return canonical_map, entity_options, target_metadata
 
 
 class FileWatcher(FileSystemEventHandler):
@@ -130,13 +223,14 @@ async def update_tracked_entities(hass, jinja_code):
                 await asyncio.sleep(10)
                 continue  # Skip and start over
 
-            cleaned = [
-                item.split("_distance_to_")[0].replace("sensor.", "")
-                for item in tracked_entities
-            ]
-            unique_values = list(set(cleaned))
+            canonical_map, _, _ = discover_distance_entities(hass)
             new_global_data = [
-                {"entity": ent, "data": global_data} for ent in unique_values
+                {
+                    "entity": ent,
+                    "data": global_data,
+                    "receiver_state_map": receiver_map,
+                }
+                for ent, receiver_map in canonical_map.items()
             ]
 
             await process_entities(hass, new_global_data)
@@ -154,13 +248,16 @@ async def update_receiver_radii(hass, eids):
         floor_scale = floor.get("scale")
         if floor_scale is None:
             continue
+        receiver_state_map = eids.get("receiver_state_map", {})
         for receiver in floor["receivers"]:
-            entity_id = (
-                "sensor."
-                + eids["entity"]
-                + "_distance_to_"
-                + receiver["entity_id"]
-            )
+            entity_id = receiver_state_map.get(receiver["entity_id"])
+            if not entity_id:
+                entity_id = (
+                    "sensor."
+                    + eids["entity"]
+                    + "_distance_to_"
+                    + receiver["entity_id"]
+                )
             rec_value = hass.states.get(entity_id)
             if rec_value is not None:
                 try:
@@ -657,26 +754,8 @@ class BPSReadAPIText(HomeAssistantView):
         hass = request.app["hass"]
         maps_path = hass.config.path("www/bps_maps")
         bpsdata_file_path = Path(maps_path) / "bpsdata.txt"
-        entityjinja = """
-        {{
-            expand(states.sensor) 
-            | selectattr("entity_id", "search", "_distance_to_")
-            | map(attribute="entity_id")
-            | map("replace", "sensor.", "")  
-            | map("regex_replace", "_distance_to_.*", "")  
-            | unique
-            | list
-        }}
-        """
-
-        try:
-            template = Template(entityjinja, hass)  # Render Jinja code
-            entities = template.async_render()
-        except Exception as e:
-            _LOGGER.info(
-                f"Error during the execution of the Jinja code: {e}"
-            )
-            entities = []
+        canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+        entities = [item["id"] for item in entity_options]
 
         try:
             if not bpsdata_file_path.is_file():  # Check if the file exists
@@ -690,7 +769,13 @@ class BPSReadAPIText(HomeAssistantView):
 
             _LOGGER.info(f"Read coordinates from bpsdata: {content}")
             return web.json_response(
-                {"coordinates": content, "entities": entities}
+                {
+                    "coordinates": content,
+                    "entities": entities,
+                    "entity_options": entity_options,
+                    "distance_entity_map": canonical_map,
+                    "target_metadata": target_metadata,
+                }
             )
 
         except Exception as e:

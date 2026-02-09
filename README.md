@@ -110,6 +110,13 @@ En el panel lateral, sección **Calibration**:
 3. Pulsa **Auto Calibrate** para calcular ajuste automáticamente.
 4. Guarda el plano para persistir cambios.
 
+### Detección automática BLE
+
+- BPS-plus detecta automáticamente dispositivos BLE y `bt proxy` desde entidades `_distance_to_`.
+- Para dispositivos con MAC privada rotativa, usa metadatos de Home Assistant (`source_type: bluetooth_le`, `current_address`, `source`, `friendly_name`) para mantener una identidad estable.
+- En la UI, el selector de dispositivos muestra nombre amigable cuando está disponible.
+- Al colocar receptores, el campo sugiere automáticamente proxies detectados.
+
 ---
 
 ## 📊 Entidades creadas

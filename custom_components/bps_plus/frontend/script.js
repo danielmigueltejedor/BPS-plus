@@ -67,6 +67,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     let device = "";
     let myScaleVal = null;
     const calibrationSamples = {};
+    let distanceEntityMap = {};
+    let targetMetadata = {};
+    let discoveredReceivers = [];
 
     const newelement = `
                 <ul class="space-y-2" id="idxxx">
@@ -116,6 +119,29 @@ document.addEventListener('DOMContentLoaded', async () => {
         let NewEnts = [];
         let socketIdCounter = 1; 
 
+        function getDistanceEntityForSelection(targetId, receiverId) {
+            if (!targetId || !receiverId) {
+                return null;
+            }
+            const targetMap = distanceEntityMap[targetId] || {};
+            return targetMap[receiverId] || null;
+        }
+
+        function refreshReceiverSuggestions() {
+            let datalist = document.getElementById("receiverSuggestions");
+            if (!datalist) {
+                datalist = document.createElement("datalist");
+                datalist.id = "receiverSuggestions";
+                document.body.appendChild(datalist);
+            }
+            datalist.innerHTML = "";
+            discoveredReceivers.forEach(receiverId => {
+                const option = document.createElement("option");
+                option.value = receiverId;
+                datalist.appendChild(option);
+            });
+        }
+
         function startTracking() {
             if (!checkCanvasImage()) return;
             if (!mapname.value) {
@@ -156,7 +182,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
             floor.receivers.forEach((entity, index) => {
-                tracked.push(`${device}_distance_to_${entity.entity_id}`);
+                const distanceEntityId = getDistanceEntityForSelection(device, entity.entity_id);
+                if (distanceEntityId) {
+                    tracked.push(distanceEntityId);
+                }
             });
 
             // Check if there are enough points for trilateration
@@ -267,7 +296,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!Array.isArray(apiresponse)) {
                     return;
                 }
-                let result = apiresponse.find(item => item.ent === device.replace("sensor.",""));
+                let result = apiresponse.find(item => item.ent === device);
                 if (!result || !Array.isArray(result.cords) || result.cords.length < 2) {
                     return;
                 }
@@ -386,14 +415,24 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             tmpfinalcords = finalcords; //Store original cords in a temp to compare later if it is changed
             console.log("Coordinates loaded:", finalcords);
-            let ents = data.entities;
-            console.log("Entities to track:", ents);
+            distanceEntityMap = data.distance_entity_map || {};
+            targetMetadata = data.target_metadata || {};
+            discoveredReceivers = Array.from(
+                new Set(
+                    Object.values(distanceEntityMap).flatMap(receiverMap => Object.keys(receiverMap || {}))
+                )
+            ).sort();
+            refreshReceiverSuggestions();
+            const entityOptions = Array.isArray(data.entity_options) && data.entity_options.length > 0
+                ? data.entity_options
+                : (data.entities || []).map(ent => ({ id: ent, name: ent }));
+            console.log("Entities to track:", entityOptions);
 
             entSelector.innerHTML = '<option value="">--Please choose an option--</option>';
-            ents.forEach(ent => {
+            entityOptions.forEach(ent => {
                 const option = document.createElement('option');
-                option.value = ent;
-                option.textContent = ent;
+                option.value = ent.id;
+                option.textContent = ent.name || ent.id;
                 entSelector.appendChild(option);
             });
             refreshCalibrationSelectors();
@@ -432,7 +471,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 } else {
                     stoptrackstat = true;
                 }
-                device = "sensor."+entSelector.value;
+                device = entSelector.value;
                 starttrackbtn.style.display = "";
             } else {
                 starttrackbtn.style.display = "none";
@@ -612,7 +651,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        const distanceEntity = `sensor.${deviceId}_distance_to_${receiverId}`;
+        const distanceEntity = getDistanceEntityForSelection(deviceId, receiverId);
+        if (!distanceEntity) {
+            alert(`No distance entity found for ${deviceId} -> ${receiverId}.`);
+            return;
+        }
         try {
             const observed = await readStateValue(distanceEntity);
             if (!calibrationSamples[receiverId]) {
@@ -1213,6 +1256,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             entityInput.type = "text";
             entityInput.id = "receiverName";
             entityInput.placeholder = "Name";
+            entityInput.setAttribute("list", "receiverSuggestions");
             entityInput.classList.add("rec-input");
             document.body.appendChild(entityInput);
         }
