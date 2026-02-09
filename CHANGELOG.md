@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.5] - 2026-02-09
+- Fixed realtime tracking config loading by allowing frontend config endpoint to be read by the panel:
+  - `GET /api/bps/frontend_config` now available without auth barrier in panel context.
+- Improved position stability for non-realtime tracking:
+  - trilateration now falls back to raw receiver points when r-change filtering leaves fewer than 3 points.
+- Updated frontend cache-busting tags to `v=1.5.5` for CSS and JS.
+
 ## [1.5.4] - 2026-02-09
 - Fixed realtime tracking auth UX by loading token/base URL from integration settings through new API:
   - `GET /api/bps/frontend_config` (auth required),

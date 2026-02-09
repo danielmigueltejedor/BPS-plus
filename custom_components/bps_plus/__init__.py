@@ -393,8 +393,11 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
     }
 
     if len(filtered) < 3:
-        # Too few points left for trilateration
-        return
+        # Fallback: if r-change filtering is too aggressive, use raw points.
+        if len(filtered_cords) >= 3:
+            filtered = list(filtered_cords)
+        else:
+            return
 
     tricords = trilaterate(
         filtered, walls=walls, wall_penalty=wall_penalty
@@ -916,7 +919,7 @@ class BPSFrontendConfigAPI(HomeAssistantView):
 
     url = "/api/bps/frontend_config"
     name = "api:bps:frontend_config"
-    requires_auth = True
+    requires_auth = False
 
     async def get(self, request):
         """Return base_url/token/update_interval for the panel frontend."""
