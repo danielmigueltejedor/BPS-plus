@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -112,6 +113,7 @@ async def async_setup_entry(
     _LOGGER.info("Setting up BPS-Plus distance sensors")
     hass.data.setdefault(DOMAIN, {})
     managed: dict[str, Entity] = hass.data[DOMAIN].setdefault("managed_sensors", {})
+    refresh_task: asyncio.Task | None = None
 
     @callback
     def _ensure_entities() -> None:
@@ -142,8 +144,20 @@ async def async_setup_entry(
 
     _ensure_entities()
 
+    async def _async_refresh_entities() -> None:
+        nonlocal refresh_task
+        try:
+            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
+            _ensure_entities()
+        except Exception as err:
+            _LOGGER.exception("Error refreshing BPS discovery: %s", err)
+        finally:
+            refresh_task = None
+
     @callback
     def _state_changed(event: Event) -> None:
+        nonlocal refresh_task
         entity_id = event.data.get("entity_id")
         if not entity_id:
             return
@@ -151,10 +165,22 @@ async def async_setup_entry(
         new_state = event.data.get("new_state")
         attrs = getattr(new_state, "attributes", {})
 
-        if "_distance_to_" in entity_id or attrs.get("source_type") == "bluetooth_le":
-            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
-            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
-            _ensure_entities()
+        # Ignore updates from sensors already managed by BPS-Plus to avoid
+        # recursive discovery/add loops under heavy state churn.
+        if attrs.get("managed_by") == DOMAIN:
+            return
+
+        should_refresh = (
+            "_distance_to_" in entity_id
+            or attrs.get("source_type") == "bluetooth_le"
+        )
+        if not should_refresh:
+            return
+
+        if refresh_task is not None and not refresh_task.done():
+            return
+
+        refresh_task = hass.async_create_task(_async_refresh_entities())
 
     unsub = hass.bus.async_listen(EVENT_STATE_CHANGED, _state_changed)
     config_entry.async_on_unload(unsub)
