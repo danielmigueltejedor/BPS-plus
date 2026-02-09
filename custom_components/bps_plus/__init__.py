@@ -28,8 +28,12 @@ from homeassistant.helpers import entity_registry as er
 from shapely.geometry import Point, Polygon
 from scipy.optimize import least_squares
 import voluptuous as vol
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+except ImportError:  # pragma: no cover - depends on HA runtime env
+    Observer = None
+    FileSystemEventHandler = object
 
 from homeassistant.config_entries import ConfigEntry
 
@@ -87,6 +91,12 @@ async def read_file(file_path):
 
 def setup_file_watcher(file_path, update_callback, hass: HomeAssistant):
     """Set up a file watcher to monitor changes"""
+    if Observer is None:
+        _LOGGER.warning(
+            "watchdog is not available. File watcher disabled for %s",
+            file_path,
+        )
+        return None
     event_handler = FileWatcher(file_path, update_callback, hass)
     observer = Observer()
     observer.schedule(event_handler, os.path.dirname(file_path), recursive=False)
@@ -423,9 +433,10 @@ async def async_setup(hass: HomeAssistant, config):
         hass.async_create_task(update_tracked_entities(hass, jinja_code))
 
         # Parar watcher al detener HA
-        hass.bus.async_listen_once(
-            "homeassistant_stop", lambda event: observer.stop()
-        )
+        if observer is not None:
+            hass.bus.async_listen_once(
+                "homeassistant_stop", lambda event: observer.stop()
+            )
 
         _LOGGER.info("The BPS-Plus integration is fully initialized")
 

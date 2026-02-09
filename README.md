@@ -54,7 +54,7 @@ Permite localizar dispositivos Bluetooth en el **plano de tu casa**, determinar 
 2. Copia los archivos en:
 
 ```
-config/custom_components/bps
+config/custom_components/bps_plus
 ```
 
 3. Reinicia Home Assistant
@@ -65,11 +65,11 @@ config/custom_components/bps
 
 ```
 mkdir -p /config/custom_components
-rm -rf /config/custom_components/bps
+rm -rf /config/custom_components/bps_plus
 
 cd /config
 git clone --depth=1 https://github.com/danielmigueltejedor/BPS-plus.git .bps-plus-tmp
-cp -r .bps-plus-tmp/custom_components/bps /config/custom_components/
+cp -r .bps-plus-tmp/custom_components/bps_plus /config/custom_components/
 
 rm -rf /config/.bps-plus-tmp
 ```
@@ -81,10 +81,10 @@ Reinicia Home Assistant.
 ## 🔄 Actualización
 
 ```
-rm -rf /config/custom_components/bps
+rm -rf /config/custom_components/bps_plus
 cd /config
 git clone --depth=1 https://github.com/danielmigueltejedor/BPS-plus.git .bps-plus-tmp
-cp -r .bps-plus-tmp/custom_components/bps /config/custom_components/
+cp -r .bps-plus-tmp/custom_components/bps_plus /config/custom_components/
 rm -rf /config/.bps-plus-tmp
 ```
 

@@ -12,7 +12,8 @@
     "aiofiles>=23.1.0",
     "numpy>=1.26.4",
     "scipy>=1.10.1",
-    "shapely>=2.0.2"
+    "shapely>=2.0.2",
+    "watchdog>=4.0.0"
   ],
   "version": "1.0.0"
 }
