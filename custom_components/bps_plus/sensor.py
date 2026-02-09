@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import time
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -37,6 +40,33 @@ def _all_receivers(canonical_map: dict[str, dict[str, str]]) -> list[str]:
     for receiver_map in canonical_map.values():
         receivers.update(receiver_map.keys())
     return sorted(receivers)
+
+
+def _is_valid_id(value: str) -> bool:
+    return bool(value) and len(value) <= 80 and re.fullmatch(r"[a-z0-9_]+", value) is not None
+
+
+def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
+    """Remove legacy malformed BPS-managed sensors from entity registry."""
+    entity_registry = er.async_get(hass)
+    removed = 0
+
+    for state in hass.states.async_all():
+        if not state.entity_id.startswith("sensor."):
+            continue
+        attrs = state.attributes
+        if attrs.get("managed_by") != DOMAIN:
+            continue
+        target_id = attrs.get("target_id", "")
+        receiver_id = attrs.get("receiver_id", "")
+        if _is_valid_id(str(target_id)) and _is_valid_id(str(receiver_id)):
+            continue
+
+        if entity_registry.async_get(state.entity_id) is not None:
+            entity_registry.async_remove(state.entity_id)
+            removed += 1
+
+    return removed
 
 
 class BpsDistanceSensor(SensorEntity):
@@ -114,6 +144,12 @@ async def async_setup_entry(
     hass.data.setdefault(DOMAIN, {})
     managed: dict[str, Entity] = hass.data[DOMAIN].setdefault("managed_sensors", {})
     refresh_task: asyncio.Task | None = None
+    last_refresh_ts = 0.0
+    min_refresh_interval = 1.5
+
+    removed = _cleanup_corrupt_managed_entities(hass)
+    if removed:
+        _LOGGER.warning("Removed %s malformed BPS entities from registry", removed)
 
     @callback
     def _ensure_entities() -> None:
@@ -123,10 +159,19 @@ async def async_setup_entry(
             return
 
         target_name_map = {item["id"]: item.get("name") or item["id"] for item in entity_options}
+        target_ids_with_data = [
+            target_id
+            for target_id, receiver_map in canonical_map.items()
+            if receiver_map
+        ]
 
         new_entities: list[Entity] = []
-        for target_id in target_name_map:
+        for target_id in target_ids_with_data:
+            if not _is_valid_id(target_id):
+                continue
             for receiver_id in receivers:
+                if not _is_valid_id(receiver_id):
+                    continue
                 key = f"{target_id}__{receiver_id}"
                 if key in managed:
                     continue
@@ -134,7 +179,7 @@ async def async_setup_entry(
                     hass=hass,
                     target_id=target_id,
                     receiver_id=receiver_id,
-                    display_name=target_name_map[target_id],
+                    display_name=target_name_map.get(target_id, target_id),
                 )
                 managed[key] = sensor
                 new_entities.append(sensor)
@@ -157,7 +202,7 @@ async def async_setup_entry(
 
     @callback
     def _state_changed(event: Event) -> None:
-        nonlocal refresh_task
+        nonlocal refresh_task, last_refresh_ts
         entity_id = event.data.get("entity_id")
         if not entity_id:
             return
@@ -176,6 +221,11 @@ async def async_setup_entry(
         )
         if not should_refresh:
             return
+
+        now = time.monotonic()
+        if now - last_refresh_ts < min_refresh_interval:
+            return
+        last_refresh_ts = now
 
         if refresh_task is not None and not refresh_task.done():
             return

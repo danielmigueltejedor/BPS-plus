@@ -167,6 +167,13 @@ def discover_distance_entities(hass: HomeAssistant):
             # Guard against malformed chained ids produced by previous loops.
             continue
         canonical_target = canonical_target_token(raw_target, current_to_source)
+        # Defensive limits to avoid creating runaway entities from malformed ids.
+        if len(canonical_target) > 80 or len(receiver) > 80:
+            continue
+        if not re.fullmatch(r"[a-z0-9_]+", canonical_target):
+            continue
+        if not re.fullmatch(r"[a-z0-9_]+", receiver):
+            continue
         canonical_map.setdefault(canonical_target, {})[receiver] = state.entity_id
 
     # Include known BLE devices even if no _distance_to_ sensor is active right now.
