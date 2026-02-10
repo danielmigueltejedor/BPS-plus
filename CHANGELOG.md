@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.6] - 2026-02-09
+- Forced visible verification update:
+  - frontend header now shows `v1.5.6`,
+  - cache-busting tags updated to `v=1.5.6` for CSS/JS.
+
 ## [1.5.5] - 2026-02-09
 - Fixed realtime tracking config loading by allowing frontend config endpoint to be read by the panel:
   - `GET /api/bps/frontend_config` now available without auth barrier in panel context.
