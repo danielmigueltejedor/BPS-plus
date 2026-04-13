@@ -227,3 +227,11 @@ La precisión depende de la posición de los bluetooth_proxy, interferencias y e
 BPS-Plus es un fork del proyecto [BPS](https://github.com/Hogster/BPS) de Hogster, 
 licenciado bajo MIT.  
 Las modificaciones y extensiones de BPS-Plus están también bajo licencia MIT.
+
+---
+
+## 💰 Donaciones
+
+Si te gusta este proyecto y quieres apoyar su desarrollo, considera hacer una donación:
+
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/DanielMiguelTejedor)
