@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.0] - 2026-04-26
+- Native BLE distance engine (`ble_scanner.py`) replaces the dependency on
+  external integrations like Bermuda BLE Trilateration:
+  - Subscribes to every advertisement HA's bluetooth integration sees
+    (local adapters + ESPHome / Shelly bluetooth proxies).
+  - Per-link EWMA RSSI with log-distance path-loss model
+    `d = 10^((tx_power - rssi) / (10 * n))`.
+  - Online per-link fit of `tx_power` and `n` driven by the
+    stationarity detector — when the target is still, the trilaterated
+    position becomes ground truth for each proxy.
+  - Auto-discovery: any device seen by ≥3 proxies becomes trackable.
+  - Receiver resolution: existing maps with `bluetooth_proxy_cocina`-
+    style ids keep working — slugs match against scanner friendly
+    names from the device registry.
+- Discovery loop replaced: no more Jinja `_distance_to_` template.
+  Targets come straight from the scanner.
+- `BpsDistanceSensor` now reads from the scanner; exposes `rssi`,
+  `tx_power`, `path_loss_n`, `calibration_samples`, `age_s` as attrs.
+- New `GET /api/bps/ble_snapshot` returns live devices, scanners and
+  per-link RSSI/distance/fit state — useful to debug coverage and
+  receiver-id mismatches without reading logs.
+
 ## [1.6.0] - 2026-04-26
 - New positioning engine (`positioning.py`):
   - robust weighted nonlinear-least-squares trilateration with soft-L1 loss,

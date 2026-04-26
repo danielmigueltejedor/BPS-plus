@@ -25,7 +25,6 @@ from homeassistant.components.websocket_api import (
     websocket_command,
 )
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.template import Template
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from shapely.geometry import Point, Polygon
@@ -40,6 +39,7 @@ from .positioning import (
     apply_calibration,
     trilaterate_robust,
 )
+from .ble_scanner import BleScanner, mac_to_token, normalize_mac as scanner_normalize_mac
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
@@ -167,57 +167,55 @@ def extract_distance_entity_parts(entity_id: str) -> tuple[str, str] | None:
     return target, receiver
 
 
+def get_scanner(hass: HomeAssistant) -> BleScanner | None:
+    return hass.data.get(DOMAIN, {}).get("scanner")
+
+
 def discover_distance_entities(hass: HomeAssistant):
-    """Discover distance entities with canonical target mapping and metadata."""
-    current_to_source, target_metadata = build_bluetooth_alias_maps(hass)
-    entity_registry = er.async_get(hass)
-    bps_owned_entities = {
-        entry.entity_id
-        for entry in entity_registry.entities.values()
-        if entry.platform == DOMAIN
-    }
+    """Native discovery from the BLE scanner.
 
+    Returns the same `(canonical_map, entity_options, target_metadata)`
+    tuple the rest of the code expects, but built directly from live
+    advertisements observed by HA's bluetooth integration. No external
+    `_distance_to_` sensors required.
+
+    `canonical_map[target_token][receiver_id]` holds a synthetic entity id
+    that BPS-Plus owns; the actual distance value is computed by the BLE
+    scanner via the log-distance path-loss model and exposed through the
+    BPS-managed sensors.
+    """
+    scanner = get_scanner(hass)
     canonical_map: dict[str, dict[str, str]] = {}
-    for state in hass.states.async_all():
-        if (
-            not state.entity_id.startswith("sensor.")
-            or "_distance_to_" not in state.entity_id
-        ):
-            continue
+    target_metadata: dict[str, dict[str, str]] = {}
+    entity_options: list[dict[str, str]] = []
 
-        # Ignore BPS-owned entities to prevent recursive self-discovery loops.
-        if state.attributes.get("managed_by") == DOMAIN:
-            continue
-        if state.entity_id in bps_owned_entities:
-            continue
+    if scanner is None:
+        return canonical_map, entity_options, target_metadata
 
-        parts = extract_distance_entity_parts(state.entity_id)
-        if not parts:
-            continue
-        raw_target, receiver = parts
-        if "_distance_to_" in raw_target:
-            # Guard against malformed chained ids produced by previous loops.
-            continue
-        canonical_target = canonical_target_token(raw_target, current_to_source)
-        canonical_target = collapse_repeated_target(canonical_target)
-        # Defensive limits to avoid creating runaway entities from malformed ids.
-        if len(canonical_target) > 80 or len(receiver) > 80:
-            continue
-        if not re.fullmatch(r"[a-z0-9_]+", canonical_target):
-            continue
-        if not re.fullmatch(r"[a-z0-9_]+", receiver):
-            continue
-        canonical_map.setdefault(canonical_target, {})[receiver] = state.entity_id
+    devices = scanner.known_devices()
+    scanners = scanner.known_scanners()
 
-    # Include known BLE devices even if no _distance_to_ sensor is active right now.
-    for target_id in target_metadata:
-        canonical_map.setdefault(target_id, {})
+    for dev in devices:
+        token = mac_to_token(dev.address)
+        target_metadata[token] = {
+            "friendly_name": dev.name or dev.address,
+            "stable_address": dev.address,
+            "current_address": dev.address,
+        }
+        receiver_map: dict[str, str] = {}
+        for sc in scanners:
+            receiver_id = mac_to_token(sc.source) or sc.source.lower()
+            receiver_map[receiver_id] = (
+                f"sensor.bps_{token}_distance_to_{receiver_id}"
+            )
+        canonical_map[token] = receiver_map
 
-    entity_options = []
     for target_id in sorted(canonical_map):
-        metadata = target_metadata.get(target_id, {})
-        name = metadata.get("friendly_name", target_id)
-        entity_options.append({"id": target_id, "name": name})
+        meta = target_metadata.get(target_id, {})
+        entity_options.append({
+            "id": target_id,
+            "name": meta.get("friendly_name", target_id),
+        })
 
     return canonical_map, entity_options, target_metadata
 
@@ -294,23 +292,33 @@ async def update_global_data(file_path):
         _LOGGER.error("Error parsing JSON data: %s", e)
 
 
-async def update_tracked_entities(hass, jinja_code):
-    """Update tracked_entities with the result of the Jinja code once per second."""
-    global tracked_entities, tracked_listeners, global_data, new_global_data
-    global secToUpdate
+async def update_tracked_entities(hass, _unused=None):
+    """Drive the positioning loop using the native BLE scanner."""
+    global tracked_entities, new_global_data, secToUpdate
     while True:
         try:
-            template = Template(jinja_code, hass)
-            tracked_entities = template.async_render()
+            scanner = get_scanner(hass)
+            if scanner is None:
+                _LOGGER.warning("BLE scanner not initialised yet, retry in 5 s")
+                await asyncio.sleep(5)
+                continue
 
-            num_points = len(tracked_entities)
-            if num_points < 3:  # There are no devices close enough to track, wait 10 seconds until try again
-                _LOGGER.info("There are no devices present to track, sleep 10 seconds")
-                await asyncio.sleep(10)
-                continue  # Skip and start over
+            candidates = scanner.candidate_targets(min_scanners=3)
+            tracked_entities = candidates
+
+            if len(candidates) < 1:
+                _LOGGER.debug(
+                    "No BLE devices currently visible to >=3 proxies "
+                    "(known devices=%d, scanners=%d)",
+                    len(scanner.devices), len(scanner.scanners),
+                )
+                await asyncio.sleep(5)
+                continue
 
             canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
             cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
+
+            candidate_set = set(candidates)
             new_global_data = [
                 {
                     "entity": ent,
@@ -318,14 +326,17 @@ async def update_tracked_entities(hass, jinja_code):
                     "receiver_state_map": receiver_map,
                 }
                 for ent, receiver_map in canonical_map.items()
+                # Only run the engine for devices we can actually trilaterate.
+                if scanner_normalize_mac(ent.replace("_", ":")) in {
+                    scanner_normalize_mac(c) for c in candidate_set
+                }
             ]
 
             await process_entities(hass, new_global_data)
 
         except Exception as e:
-            _LOGGER.info(f"Error executing Jinja code: {e}")
+            _LOGGER.exception("Positioning loop iteration failed: %s", e)
 
-        # Run every X seconds, set timer in global variables
         await asyncio.sleep(secToUpdate)
 
 
@@ -348,10 +359,30 @@ def _get_engine_state(entity: str) -> dict:
     return state
 
 
+def _target_token_to_mac(target_token: str) -> str | None:
+    """Convert `aa_bb_cc_dd_ee_ff` -> `AA:BB:CC:DD:EE:FF`."""
+    return scanner_normalize_mac(target_token.replace("_", ":"))
+
+
 def _build_floor_buckets(hass, eids, engine):
-    """Per-floor measurement buckets ready for trilateration."""
-    receiver_state_map = eids.get("receiver_state_map", {})
+    """Per-floor buckets fed by the native BLE scanner.
+
+    Distances now come straight from RSSI via the log-distance model
+    inside `BleScanner.get_distance()`. Each receiver in the saved map is
+    resolved to a live scanner source (proxy MAC) by friendly-name slug
+    or MAC, so existing maps with `bluetooth_proxy_cocina`-style ids keep
+    working.
+    """
+    scanner = get_scanner(hass)
+    if scanner is None:
+        return {}
+
+    target_mac = _target_token_to_mac(eids["entity"])
+    if target_mac is None:
+        return {}
+
     smoothers = engine["smoothers"]
+    receiver_sources: dict[str, str] = engine.setdefault("receiver_sources", {})
     buckets: dict[str, dict] = {}
 
     for floor in eids["data"].get("floor", []):
@@ -369,12 +400,11 @@ def _build_floor_buckets(hass, eids, engine):
             wall_penalty_m = float(floor.get("wall_penalty", 2.5))
         except (TypeError, ValueError):
             wall_penalty_m = 2.5
-        # The legacy code added the meter-valued penalty straight to a
-        # pixel-valued residual. Convert to pixels so the units match.
         wall_penalty_px = max(0.0, wall_penalty_m * scale)
 
         floor_name = floor.get("name") or "_"
         samples: list[DistanceSample] = []
+        sample_sources: dict[str, str] = {}
 
         for receiver in floor.get("receivers", []):
             cords = receiver.get("cords") or {}
@@ -384,24 +414,24 @@ def _build_floor_buckets(hass, eids, engine):
             except (TypeError, ValueError):
                 continue
 
-            ent_id = receiver_state_map.get(receiver["entity_id"])
-            if not ent_id:
-                ent_id = (
-                    f"sensor.{eids['entity']}_distance_to_"
-                    f"{receiver['entity_id']}"
-                )
-            state = hass.states.get(ent_id)
-            if state is None:
+            receiver_id = receiver["entity_id"]
+            source = receiver_sources.get(receiver_id)
+            if source is None:
+                source = scanner.resolve_receiver(receiver_id)
+                if source is not None:
+                    receiver_sources[receiver_id] = source
+            if source is None:
                 continue
-            try:
-                raw_m = float(state.state)
-            except (TypeError, ValueError):
+
+            reading = scanner.get_distance(target_mac, source)
+            if reading is None:
                 continue
+            raw_m = float(reading["distance_m"])
             if not math.isfinite(raw_m) or raw_m <= 0:
                 continue
 
             corrected_m = apply_calibration(raw_m, receiver.get("calibration"))
-            smoother_key = f"{floor_name}::{receiver['entity_id']}"
+            smoother_key = f"{floor_name}::{receiver_id}"
             smoother = smoothers.setdefault(smoother_key, DistanceSmoother())
             smoothed_m, sigma_m, _accepted = smoother.push(corrected_m)
             if smoothed_m is None or smoothed_m <= 0:
@@ -411,7 +441,7 @@ def _build_floor_buckets(hass, eids, engine):
             sigma_px = max(2.0, sigma_m * scale)
             samples.append(
                 DistanceSample(
-                    receiver_id=receiver["entity_id"],
+                    receiver_id=receiver_id,
                     x=rx,
                     y=ry,
                     raw_distance_m=raw_m,
@@ -421,13 +451,16 @@ def _build_floor_buckets(hass, eids, engine):
                 )
             )
             cords["r"] = radius_px
+            sample_sources[receiver_id] = source
 
         if samples:
             buckets[floor_name] = {
                 "samples": samples,
+                "sources": sample_sources,
                 "walls": floor.get("walls", []),
                 "wall_penalty_px": wall_penalty_px,
                 "scale": scale,
+                "target_mac": target_mac,
             }
 
     return buckets
@@ -488,10 +521,18 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
 
     # Stationarity-driven self-calibration: if we've been still long enough,
     # the true distance to each receiver is just |position - receiver|.
+    # Feeds two parallel models:
+    #   1. Per-receiver linear correction (factor + offset) on top of the
+    #      log-distance distance estimate.
+    #   2. Per-link RSSI path-loss fit (tx_power, n) inside the BLE scanner
+    #      itself — the *root* of the distance estimate.
     stationary = engine["stationary"].push(now, avg_x, avg_y)
     if stationary is not None:
         cx, cy, _dur = stationary
         scale = bucket["scale"] or 1.0
+        scanner = get_scanner(hass)
+        target_mac = bucket.get("target_mac")
+        sources = bucket.get("sources", {})
         for s in samples:
             true_m = math.hypot(s.x - cx, s.y - cy) / scale
             calib = engine["autocal"].setdefault(
@@ -501,6 +542,10 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
             fit_cal = calib.fit()
             if fit_cal is not None:
                 engine["last_fits"][s.receiver_id] = fit_cal
+            if scanner is not None and target_mac:
+                source = sources.get(s.receiver_id)
+                if source:
+                    scanner.add_calibration_sample(target_mac, source, true_m)
 
     point = Point(avg_x, avg_y)
     zone = find_zone_for_point(new_global_data, entity, floor_name, point)
@@ -638,6 +683,7 @@ async def async_setup(hass: HomeAssistant, config):
             hass.http.register_view(BPSReadAPIText())
             hass.http.register_view(BPSFrontendConfigAPI())
             hass.http.register_view(BPSDistanceValueAPI())
+            hass.http.register_view(BPSBleSnapshotAPI())
             hass.http.register_view(BPSDiagnosticsAPI())
             hass.http.register_view(BPSCordsAPI(hass))
             hass.data[views_flag_key] = True
@@ -701,19 +747,17 @@ async def async_setup(hass: HomeAssistant, config):
             target_file, lambda: update_global_data(target_file), hass
         )
 
-        # Jinja para descubrir entidades _distance_to_
-        jinja_code = """
-        {{
-            expand(states.sensor)
-            | selectattr("entity_id", "search", "_distance_to_")
-            | selectattr("state", "is_number")
-            | map(attribute="entity_id")
-            | unique
-            | list
-        }}
-        """
+        # Native BLE scanner (replaces external Bermuda dependency).
+        scanner = hass.data[DOMAIN].get("scanner")
+        if scanner is None:
+            scanner = BleScanner(hass)
+            scanner.start()
+            hass.data[DOMAIN]["scanner"] = scanner
+            hass.bus.async_listen_once(
+                "homeassistant_stop", lambda _e: scanner.stop()
+            )
 
-        hass.async_create_task(update_tracked_entities(hass, jinja_code))
+        hass.async_create_task(update_tracked_entities(hass))
 
         # Parar watcher al detener HA
         if observer is not None:
@@ -1066,6 +1110,23 @@ class BPSDistanceValueAPI(HomeAssistantView):
         return web.json_response(
             {"entity_id": entity_id, "value": value}
         )
+
+
+class BPSBleSnapshotAPI(HomeAssistantView):
+    """Live snapshot of what the native BLE scanner is seeing."""
+
+    url = "/api/bps/ble_snapshot"
+    name = "api:bps:ble_snapshot"
+    requires_auth = False
+
+    async def get(self, request):
+        hass = request.app["hass"]
+        scanner = get_scanner(hass)
+        if scanner is None:
+            return web.json_response(
+                {"error": "scanner_not_initialised"}, status=503
+            )
+        return web.json_response(scanner.snapshot())
 
 
 class BPSDiagnosticsAPI(HomeAssistantView):

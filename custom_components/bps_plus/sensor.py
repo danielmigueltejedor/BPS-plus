@@ -15,7 +15,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import DOMAIN
-from .__init__ import discover_distance_entities, cache_discovery_data
+from .__init__ import (
+    cache_discovery_data,
+    discover_distance_entities,
+    get_scanner,
+)
+from .ble_scanner import normalize_mac as scanner_normalize_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +109,7 @@ class BpsDistanceSensor(SensorEntity):
         self._attr_name = f"{display_name} distance to {receiver_id}"
         self._attr_native_value = None
         self._source_entity_id: str | None = None
+        self._cached_reading: dict | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -116,35 +122,48 @@ class BpsDistanceSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {
+        attrs: dict[str, Any] = {
             "target_id": self._target_id,
             "receiver_id": self._receiver_id,
             "source_entity_id": self._source_entity_id,
             "managed_by": DOMAIN,
         }
+        reading = getattr(self, "_cached_reading", None)
+        if reading:
+            attrs["rssi"] = round(float(reading["rssi"]), 1)
+            attrs["tx_power"] = round(float(reading["tx_power"]), 1)
+            attrs["path_loss_n"] = round(float(reading["path_loss"]), 2)
+            attrs["calibration_samples"] = int(reading["samples"])
+            attrs["age_s"] = round(float(reading["age_s"]), 1)
+        return attrs
 
     async def async_update(self) -> None:
         canonical_map, _, _ = _get_cached_discovery(self.hass)
-        source = canonical_map.get(self._target_id, {}).get(self._receiver_id)
-        self._source_entity_id = source
+        synthetic = canonical_map.get(self._target_id, {}).get(self._receiver_id)
+        self._source_entity_id = synthetic
 
-        if not source:
+        scanner = get_scanner(self.hass)
+        if scanner is None:
             self._attr_native_value = None
             self._attr_available = False
             return
 
-        state = self.hass.states.get(source)
-        if state is None:
+        target_mac = scanner_normalize_mac(self._target_id.replace("_", ":"))
+        source = scanner.resolve_receiver(self._receiver_id)
+        if not target_mac or not source:
             self._attr_native_value = None
             self._attr_available = False
             return
 
-        try:
-            self._attr_native_value = float(state.state)
-            self._attr_available = True
-        except (TypeError, ValueError):
+        reading = scanner.get_distance(target_mac, source)
+        if reading is None:
             self._attr_native_value = None
             self._attr_available = False
+            return
+
+        self._attr_native_value = round(float(reading["distance_m"]), 2)
+        self._attr_available = True
+        self._cached_reading = reading
 
 
 async def async_setup_entry(
