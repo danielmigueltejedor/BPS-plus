@@ -23,6 +23,22 @@ All notable changes to this project are documented in this file.
 - New `GET /api/bps/ble_snapshot` returns live devices, scanners and
   per-link RSSI/distance/fit state — useful to debug coverage and
   receiver-id mismatches without reading logs.
+- IRK-stable identities via the `private_ble_device` integration:
+  - any HA entity exposing `source_type: bluetooth_le` plus a
+    `current_address` attribute is picked up automatically,
+  - a stable token (the entity slug, e.g. `iphone_de_mama`) is bound to
+    the rotating MAC inside the scanner via `set_alias()`,
+  - per-link calibration migrates with the alias so MAC rotations do
+    not reset path-loss fits,
+  - `device_tracker.*` entities are preferred when several siblings
+    point at the same MAC.
+- Sensor creation discipline: only materialises `BpsDistanceSensor`
+  rows for targets with a real friendly name AND for receivers actually
+  placed on a saved map. The legacy
+  `Distance to aa_bb_cc_..` flood is gone.
+- `_cleanup_corrupt_managed_entities` now also evicts zombie sensors
+  whose target is a bare MAC slug with no resolved name and no current
+  reading.
 
 ## [1.6.0] - 2026-04-26
 - New positioning engine (`positioning.py`):

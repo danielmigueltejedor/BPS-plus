@@ -59,8 +59,18 @@ def _looks_repeated(value: str) -> bool:
     return parts[:half] == parts[half:]
 
 
+_MAC_SLUG_RE = re.compile(r"^[0-9a-f]{2}(_[0-9a-f]{2}){5}$")
+
+
 def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
-    """Remove legacy malformed BPS-managed sensors from entity registry."""
+    """Remove legacy / zombie BPS-managed sensors from entity registry.
+
+    Drops:
+      * malformed ids (legacy bug),
+      * sensors targeting a bare MAC slug whose entity name is still the
+        raw MAC (no friendly name was ever resolved — these are the
+        `Distance to aa_bb_cc_..` rows that flooded the dashboard).
+    """
     entity_registry = er.async_get(hass)
     removed = 0
 
@@ -70,14 +80,26 @@ def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
         attrs = state.attributes
         if attrs.get("managed_by") != DOMAIN:
             continue
-        target_id = attrs.get("target_id", "")
-        receiver_id = attrs.get("receiver_id", "")
-        if (
-            _is_valid_id(str(target_id))
-            and _is_valid_id(str(receiver_id))
-            and not _looks_repeated(str(target_id))
-            and not _looks_repeated(str(receiver_id))
-        ):
+        target_id = str(attrs.get("target_id", ""))
+        receiver_id = str(attrs.get("receiver_id", ""))
+
+        malformed = (
+            not _is_valid_id(target_id)
+            or not _is_valid_id(receiver_id)
+            or _looks_repeated(target_id)
+            or _looks_repeated(receiver_id)
+        )
+
+        zombie = False
+        if not malformed and _MAC_SLUG_RE.match(target_id):
+            friendly = str(attrs.get("friendly_name") or "")
+            # Zombie if the friendly name still embeds the raw MAC slug
+            # (i.e. discovery never resolved a real device name) AND the
+            # sensor has no current value (state is unknown).
+            if target_id in friendly and state.state in ("unknown", "unavailable", None):
+                zombie = True
+
+        if not malformed and not zombie:
             continue
 
         if entity_registry.async_get(state.entity_id) is not None:
@@ -148,14 +170,15 @@ class BpsDistanceSensor(SensorEntity):
             self._attr_available = False
             return
 
-        target_mac = scanner_normalize_mac(self._target_id.replace("_", ":"))
+        from .__init__ import _resolve_target_identity
+        identity = _resolve_target_identity(self.hass, self._target_id)
         source = scanner.resolve_receiver(self._receiver_id)
-        if not target_mac or not source:
+        if not identity or not source:
             self._attr_native_value = None
             self._attr_available = False
             return
 
-        reading = scanner.get_distance(target_mac, source)
+        reading = scanner.get_distance(identity, source)
         if reading is None:
             self._attr_native_value = None
             self._attr_available = False
@@ -186,24 +209,51 @@ async def async_setup_entry(
     @callback
     def _ensure_entities() -> None:
         canonical_map, entity_options, _ = _get_cached_discovery(hass)
-        receivers = _all_receivers(canonical_map)
-        if not receivers:
+        if not canonical_map:
             return
 
-        target_name_map = {item["id"]: item.get("name") or item["id"] for item in entity_options}
-        target_ids_with_data = [
+        target_name_map = {
+            item["id"]: item.get("name") or item["id"] for item in entity_options
+        }
+
+        # Restrict receivers to those the user actually placed on a map.
+        # Otherwise we'd cross-multiply every BLE proxy with every visible
+        # device and pollute the entity registry with hundreds of unused
+        # sensors.
+        from .__init__ import global_data
+        placed_receivers: set[str] = set()
+        try:
+            for floor in (global_data or {}).get("floor", []):
+                for receiver in floor.get("receivers", []):
+                    rid = receiver.get("entity_id")
+                    if rid:
+                        placed_receivers.add(rid)
+        except AttributeError:
+            placed_receivers = set()
+
+        if not placed_receivers:
+            placed_receivers = set(_all_receivers(canonical_map))
+        if not placed_receivers:
+            return
+
+        # Only materialise sensors for targets that have a friendly name
+        # distinct from the bare MAC token. Drops random rotating Apple
+        # chaff that has no name and would only ever be "desconocido".
+        meaningful_targets = [
             target_id
             for target_id, receiver_map in canonical_map.items()
             if receiver_map
+            and target_name_map.get(target_id)
+            and target_name_map[target_id] != target_id
         ]
 
         new_entities: list[Entity] = []
-        for target_id in target_ids_with_data:
+        for target_id in meaningful_targets:
             if not _is_valid_id(target_id):
                 continue
             if _looks_repeated(target_id):
                 continue
-            for receiver_id in receivers:
+            for receiver_id in placed_receivers:
                 if not _is_valid_id(receiver_id):
                     continue
                 if _looks_repeated(receiver_id):

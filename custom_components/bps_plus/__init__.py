@@ -171,18 +171,78 @@ def get_scanner(hass: HomeAssistant) -> BleScanner | None:
     return hass.data.get(DOMAIN, {}).get("scanner")
 
 
+_MAC_TOKEN_RE = re.compile(r"^[0-9a-f]{2}(_[0-9a-f]{2}){5}$")
+
+
+def _resolve_target_identity(hass: HomeAssistant, entity_token: str) -> str | None:
+    """Map a target token to the identity used inside the BLE scanner.
+
+    Stable tokens (private_ble_device-style) are returned verbatim — the
+    scanner stores their links under the alias. Raw MAC slugs are
+    converted back to canonical `AA:BB:CC:..` form.
+    """
+    if not entity_token:
+        return None
+    meta = hass.data.get(DOMAIN, {}).get("target_metadata", {}).get(entity_token)
+    if meta and meta.get("is_alias"):
+        return entity_token
+    if _MAC_TOKEN_RE.match(entity_token):
+        return scanner_normalize_mac(entity_token.replace("_", ":"))
+    # Last resort: assume alias.
+    return entity_token
+
+
+def _collect_stable_ble_targets(hass: HomeAssistant) -> dict[str, dict]:
+    """Read IRK-resolved identities exposed by `private_ble_device` (etc).
+
+    Any HA entity reporting `source_type: bluetooth_le` plus a
+    `current_address` attribute counts. We dedupe by current MAC and
+    prefer `device_tracker.*` entities so the chosen token survives even
+    when sibling sensors come and go.
+    """
+    candidates: list = []
+    for state in hass.states.async_all():
+        attrs = state.attributes
+        if attrs.get("source_type") != "bluetooth_le":
+            continue
+        current = scanner_normalize_mac(attrs.get("current_address"))
+        if current is None:
+            continue
+        candidates.append((state, current))
+
+    by_mac: dict[str, object] = {}
+    for state, mac in candidates:
+        existing = by_mac.get(mac)
+        if existing is None:
+            by_mac[mac] = state
+            continue
+        existing_pref = existing.entity_id.startswith("device_tracker.")
+        new_pref = state.entity_id.startswith("device_tracker.")
+        if new_pref and not existing_pref:
+            by_mac[mac] = state
+
+    targets: dict[str, dict] = {}
+    for mac, state in by_mac.items():
+        attrs = state.attributes
+        token_raw = state.entity_id.split(".", 1)[-1]
+        token = re.sub(r"[^a-z0-9]+", "_", token_raw.lower()).strip("_")
+        if not token:
+            continue
+        friendly = attrs.get("friendly_name") or state.name or token
+        targets[token] = {
+            "friendly_name": str(friendly),
+            "current_address": mac,
+        }
+    return targets
+
+
 def discover_distance_entities(hass: HomeAssistant):
-    """Native discovery from the BLE scanner.
+    """Native discovery from the BLE scanner + private_ble_device.
 
-    Returns the same `(canonical_map, entity_options, target_metadata)`
-    tuple the rest of the code expects, but built directly from live
-    advertisements observed by HA's bluetooth integration. No external
-    `_distance_to_` sensors required.
-
-    `canonical_map[target_token][receiver_id]` holds a synthetic entity id
-    that BPS-Plus owns; the actual distance value is computed by the BLE
-    scanner via the log-distance path-loss model and exposed through the
-    BPS-managed sensors.
+    Returns `(canonical_map, entity_options, target_metadata)`. Stable
+    targets (IRK-resolved by `private_ble_device`) take precedence so
+    iPhones and Apple Watches remain trackable across MAC rotations.
+    Anything else seen by the scanner shows up as a raw MAC entry.
     """
     scanner = get_scanner(hass)
     canonical_map: dict[str, dict[str, str]] = {}
@@ -192,23 +252,65 @@ def discover_distance_entities(hass: HomeAssistant):
     if scanner is None:
         return canonical_map, entity_options, target_metadata
 
-    devices = scanner.known_devices()
-    scanners = scanner.known_scanners()
+    scanners_list = scanner.known_scanners()
 
-    for dev in devices:
-        token = mac_to_token(dev.address)
-        target_metadata[token] = {
-            "friendly_name": dev.name or dev.address,
-            "stable_address": dev.address,
-            "current_address": dev.address,
-        }
-        receiver_map: dict[str, str] = {}
-        for sc in scanners:
-            receiver_id = mac_to_token(sc.source) or sc.source.lower()
-            receiver_map[receiver_id] = (
-                f"sensor.bps_{token}_distance_to_{receiver_id}"
+    def _build_receiver_map(token: str) -> dict[str, str]:
+        return {
+            (mac_to_token(sc.source) or sc.source.lower()): (
+                f"sensor.bps_{token}_distance_to_"
+                f"{mac_to_token(sc.source) or sc.source.lower()}"
             )
-        canonical_map[token] = receiver_map
+            for sc in scanners_list
+        }
+
+    # Stable / IRK-resolved targets first. Push the alias into the
+    # scanner so calibration survives MAC rotations.
+    stable_targets = _collect_stable_ble_targets(hass)
+    used_macs: set[str] = set()
+    for token, meta in stable_targets.items():
+        scanner.set_alias(meta["current_address"], token)
+        target_metadata[token] = {
+            "friendly_name": meta["friendly_name"],
+            "stable_address": token,
+            "current_address": meta["current_address"],
+            "is_alias": True,
+        }
+        canonical_map[token] = _build_receiver_map(token)
+        used_macs.add(meta["current_address"])
+
+    # Raw devices the scanner sees that aren't already covered above.
+    # Be picky on purpose: BLE is a noisy sea (random Apple chaff,
+    # rotating beacons, neighbours' devices...). Only surface raw devices
+    # that broadcast a useful name AND are visible to >=3 proxies right
+    # now. Stable targets above are exempt — the user has explicitly
+    # paired them via private_ble_device.
+    candidate_macs = set(scanner.candidate_targets(min_scanners=3))
+    for dev in scanner.known_devices():
+        if dev.identity in canonical_map:
+            continue
+        if dev.current_mac and dev.current_mac in used_macs:
+            continue
+        normalised = scanner_normalize_mac(dev.identity)
+        if normalised is None:
+            # Aliased identity that wasn't registered as a stable target
+            # this tick — skip; it will reappear once private_ble_device
+            # publishes its current_address again.
+            continue
+        if normalised not in candidate_macs:
+            continue
+        adv_name = (dev.name or "").strip()
+        if not adv_name or adv_name == dev.address or scanner_normalize_mac(adv_name) is not None:
+            # No real advertising name — drop. We do not want to spam
+            # HA's entity registry with `Distance to aa_bb_cc_..` rows.
+            continue
+        token = mac_to_token(normalised)
+        target_metadata[token] = {
+            "friendly_name": adv_name,
+            "stable_address": normalised,
+            "current_address": normalised,
+            "is_alias": False,
+        }
+        canonical_map[token] = _build_receiver_map(token)
 
     for target_id in sorted(canonical_map):
         meta = target_metadata.get(target_id, {})
@@ -327,9 +429,7 @@ async def update_tracked_entities(hass, _unused=None):
                 }
                 for ent, receiver_map in canonical_map.items()
                 # Only run the engine for devices we can actually trilaterate.
-                if scanner_normalize_mac(ent.replace("_", ":")) in {
-                    scanner_normalize_mac(c) for c in candidate_set
-                }
+                if _resolve_target_identity(hass, ent) in candidate_set
             ]
 
             await process_entities(hass, new_global_data)
@@ -359,11 +459,6 @@ def _get_engine_state(entity: str) -> dict:
     return state
 
 
-def _target_token_to_mac(target_token: str) -> str | None:
-    """Convert `aa_bb_cc_dd_ee_ff` -> `AA:BB:CC:DD:EE:FF`."""
-    return scanner_normalize_mac(target_token.replace("_", ":"))
-
-
 def _build_floor_buckets(hass, eids, engine):
     """Per-floor buckets fed by the native BLE scanner.
 
@@ -377,8 +472,8 @@ def _build_floor_buckets(hass, eids, engine):
     if scanner is None:
         return {}
 
-    target_mac = _target_token_to_mac(eids["entity"])
-    if target_mac is None:
+    target_identity = _resolve_target_identity(hass, eids["entity"])
+    if not target_identity:
         return {}
 
     smoothers = engine["smoothers"]
@@ -423,7 +518,7 @@ def _build_floor_buckets(hass, eids, engine):
             if source is None:
                 continue
 
-            reading = scanner.get_distance(target_mac, source)
+            reading = scanner.get_distance(target_identity, source)
             if reading is None:
                 continue
             raw_m = float(reading["distance_m"])
@@ -460,7 +555,7 @@ def _build_floor_buckets(hass, eids, engine):
                 "walls": floor.get("walls", []),
                 "wall_penalty_px": wall_penalty_px,
                 "scale": scale,
-                "target_mac": target_mac,
+                "target_identity": target_identity,
             }
 
     return buckets
@@ -531,7 +626,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
         cx, cy, _dur = stationary
         scale = bucket["scale"] or 1.0
         scanner = get_scanner(hass)
-        target_mac = bucket.get("target_mac")
+        target_identity = bucket.get("target_identity")
         sources = bucket.get("sources", {})
         for s in samples:
             true_m = math.hypot(s.x - cx, s.y - cy) / scale
@@ -542,10 +637,12 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
             fit_cal = calib.fit()
             if fit_cal is not None:
                 engine["last_fits"][s.receiver_id] = fit_cal
-            if scanner is not None and target_mac:
+            if scanner is not None and target_identity:
                 source = sources.get(s.receiver_id)
                 if source:
-                    scanner.add_calibration_sample(target_mac, source, true_m)
+                    scanner.add_calibration_sample(
+                        target_identity, source, true_m,
+                    )
 
     point = Point(avg_x, avg_y)
     zone = find_zone_for_point(new_global_data, entity, floor_name, point)

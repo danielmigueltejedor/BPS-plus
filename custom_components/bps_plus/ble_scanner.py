@@ -85,10 +85,23 @@ class LinkState:
 
 @dataclass
 class DeviceMeta:
-    address: str
+    """One trackable BLE identity.
+
+    `identity` is what BPS uses everywhere as the dict key — for raw
+    devices that's the MAC, for IRK-resolved devices (private_ble_device)
+    it's the stable token. `current_mac` is the live rotating MAC used
+    only for display.
+    """
+    identity: str
     name: str = ""
+    current_mac: str | None = None
     tx_power_adv: float | None = None
     last_seen: float = 0.0
+
+    @property
+    def address(self) -> str:
+        """Backwards-compatible alias for the displayable address."""
+        return self.current_mac or self.identity
 
 
 @dataclass
@@ -110,6 +123,11 @@ class BleScanner:
         self._unsub = None
         self._name_cache: dict[str, str] = {}
         self._receiver_resolution: dict[str, str | None] = {}
+        # Maps a (rotating) device MAC to a stable identity supplied by an
+        # external resolver (e.g. private_ble_device's IRK matching). When
+        # set, advertisements arriving under the MAC are stored under the
+        # alias instead, so calibration and link history survive rotations.
+        self._aliases: dict[str, str] = {}
 
     # -- Lifecycle ----------------------------------------------------------
 
@@ -165,15 +183,18 @@ class BleScanner:
                 return
             now = time.monotonic()
 
-            meta = self.devices.get(mac)
+            identity = self._aliases.get(mac, mac)
+
+            meta = self.devices.get(identity)
             if meta is None:
-                meta = DeviceMeta(address=mac)
-                self.devices[mac] = meta
+                meta = DeviceMeta(identity=identity, current_mac=mac)
+                self.devices[identity] = meta
+            meta.current_mac = mac
             adv_name = getattr(service_info, "name", None)
             if adv_name and adv_name != mac:
                 meta.name = str(adv_name)
             if not meta.name:
-                meta.name = mac
+                meta.name = identity
             tx_adv = getattr(service_info, "tx_power", None)
             if tx_adv is not None and -127 <= tx_adv <= 20:
                 meta.tx_power_adv = float(tx_adv)
@@ -187,7 +208,7 @@ class BleScanner:
                 self.scanners[source] = scanner_meta
             scanner_meta.last_seen = now
 
-            key = (mac, source)
+            key = (identity, source)
             link = self.links.get(key)
             if link is None:
                 link = LinkState(
@@ -204,6 +225,53 @@ class BleScanner:
             link.last_seen = now
         except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("BLE adv handler error: %s", err)
+
+    def set_alias(self, mac: str, alias_id: str) -> None:
+        """Bind a rotating MAC to a stable identity (e.g. an IRK token).
+
+        After this call, advertisements arriving under `mac` are stored
+        under `alias_id`. Any existing per-link calibration captured under
+        `mac` is migrated to the alias so a rotation doesn't reset the
+        path-loss fit.
+        """
+        mac_norm = normalize_mac(mac)
+        if not mac_norm or not alias_id:
+            return
+        if self._aliases.get(mac_norm) == alias_id:
+            return
+        self._aliases[mac_norm] = alias_id
+
+        # Migrate link state captured under the raw MAC.
+        keys_to_migrate = [k for k in list(self.links) if k[0] == mac_norm]
+        for key in keys_to_migrate:
+            new_key = (alias_id, key[1])
+            link = self.links.pop(key)
+            existing = self.links.get(new_key)
+            if existing is None:
+                self.links[new_key] = link
+            else:
+                # Aliased link already has fitted calibration; keep it but
+                # pull in the latest RSSI/timestamp from the migrating one.
+                if link.last_seen > existing.last_seen:
+                    existing.last_rssi = link.last_rssi
+                    existing.rssi_ewma = link.rssi_ewma
+                    existing.last_seen = link.last_seen
+
+        # Migrate device meta.
+        if mac_norm in self.devices:
+            raw_meta = self.devices.pop(mac_norm)
+            existing_meta = self.devices.get(alias_id)
+            if existing_meta is None:
+                raw_meta.identity = alias_id
+                if not raw_meta.current_mac:
+                    raw_meta.current_mac = mac_norm
+                self.devices[alias_id] = raw_meta
+            else:
+                existing_meta.current_mac = mac_norm
+                if raw_meta.last_seen > existing_meta.last_seen:
+                    existing_meta.last_seen = raw_meta.last_seen
+                if raw_meta.tx_power_adv is not None:
+                    existing_meta.tx_power_adv = raw_meta.tx_power_adv
 
     def _resolve_scanner_name(self, source: str) -> str:
         if source in self._name_cache:
@@ -313,10 +381,15 @@ class BleScanner:
     def invalidate_receiver_cache(self) -> None:
         self._receiver_resolution.clear()
 
+    @staticmethod
+    def _identity_key(value: str) -> str:
+        mac = normalize_mac(value)
+        return mac if mac is not None else str(value)
+
     def get_distance(
-        self, mac: str, source: str, max_age: float = STALE_AFTER
+        self, identity: str, source: str, max_age: float = STALE_AFTER
     ) -> dict | None:
-        link = self.links.get((mac.upper(), source.upper()))
+        link = self.links.get((self._identity_key(identity), source.upper()))
         if link is None or link.rssi_ewma is None:
             return None
         if time.monotonic() - link.last_seen > max_age:
@@ -336,9 +409,9 @@ class BleScanner:
     # -- Calibration --------------------------------------------------------
 
     def add_calibration_sample(
-        self, mac: str, source: str, true_distance_m: float
+        self, identity: str, source: str, true_distance_m: float
     ) -> None:
-        link = self.links.get((mac.upper(), source.upper()))
+        link = self.links.get((self._identity_key(identity), source.upper()))
         if link is None or link.rssi_ewma is None:
             return
         if true_distance_m <= 0.05 or not math.isfinite(true_distance_m):
