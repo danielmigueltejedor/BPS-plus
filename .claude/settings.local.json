@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile custom_components/bps_plus/positioning.py)",
+      "Bash(python -m py_compile custom_components/bps_plus/__init__.py)",
+      "Bash(python3 -m py_compile /Users/danielmigueltejedor/VSCode/BPS-plus/custom_components/bps_plus/positioning.py)",
+      "Bash(python3 -m py_compile /Users/danielmigueltejedor/VSCode/BPS-plus/custom_components/bps_plus/__init__.py)",
+      "Bash(python3 -m py_compile /Users/danielmigueltejedor/VSCode/BPS-plus/custom_components/bps_plus/sensor.py)",
+      "Bash(python3 -m py_compile /Users/danielmigueltejedor/VSCode/BPS-plus/custom_components/bps_plus/config_flow.py)",
+      "Read(//private/tmp/**)",
+      "Bash(cp /Users/danielmigueltejedor/VSCode/BPS-plus/custom_components/bps_plus/positioning.py /tmp/positioning.py)",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

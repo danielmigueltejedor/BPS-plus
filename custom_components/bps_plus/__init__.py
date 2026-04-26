@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import math
 import os
 import json
 import re
+import time
 from pathlib import Path
 from asyncio import Lock, Queue, wait_for, TimeoutError
 
@@ -26,9 +28,18 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.template import Template
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-from shapely.geometry import Point, Polygon, LineString
-from scipy.optimize import least_squares
+from shapely.geometry import Point, Polygon
 import voluptuous as vol
+
+from .positioning import (
+    AutoCalibrator,
+    DistanceSample,
+    DistanceSmoother,
+    PositionKalman,
+    StationarityDetector,
+    apply_calibration,
+    trilaterate_robust,
+)
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
@@ -318,112 +329,216 @@ async def update_tracked_entities(hass, jinja_code):
         await asyncio.sleep(secToUpdate)
 
 
-async def update_receiver_radii(hass, eids):
-    """Update receiver 'r' values for an entity"""
-    for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
-        floor_scale = floor.get("scale")
-        if floor_scale is None:
+# Per-entity engine state: smoothers, Kalman, stationarity, autocal.
+_engine_state: dict[str, dict] = {}
+
+
+def _get_engine_state(entity: str) -> dict:
+    state = _engine_state.get(entity)
+    if state is None:
+        state = {
+            "smoothers": {},          # smoother_key -> DistanceSmoother
+            "kalman": PositionKalman(),
+            "stationary": StationarityDetector(),
+            "autocal": {},            # receiver_id -> AutoCalibrator
+            "last_fits": {},          # receiver_id -> latest fit dict
+            "quality": {},            # latest position quality summary
+        }
+        _engine_state[entity] = state
+    return state
+
+
+def _build_floor_buckets(hass, eids, engine):
+    """Per-floor measurement buckets ready for trilateration."""
+    receiver_state_map = eids.get("receiver_state_map", {})
+    smoothers = engine["smoothers"]
+    buckets: dict[str, dict] = {}
+
+    for floor in eids["data"].get("floor", []):
+        scale_raw = floor.get("scale")
+        if scale_raw is None:
             continue
-        receiver_state_map = eids.get("receiver_state_map", {})
-        for receiver in floor["receivers"]:
-            entity_id = receiver_state_map.get(receiver["entity_id"])
-            if not entity_id:
-                entity_id = (
-                    "sensor."
-                    + eids["entity"]
-                    + "_distance_to_"
-                    + receiver["entity_id"]
+        try:
+            scale = float(scale_raw)
+        except (TypeError, ValueError):
+            continue
+        if scale <= 0:
+            continue
+
+        try:
+            wall_penalty_m = float(floor.get("wall_penalty", 2.5))
+        except (TypeError, ValueError):
+            wall_penalty_m = 2.5
+        # The legacy code added the meter-valued penalty straight to a
+        # pixel-valued residual. Convert to pixels so the units match.
+        wall_penalty_px = max(0.0, wall_penalty_m * scale)
+
+        floor_name = floor.get("name") or "_"
+        samples: list[DistanceSample] = []
+
+        for receiver in floor.get("receivers", []):
+            cords = receiver.get("cords") or {}
+            try:
+                rx = float(cords.get("x"))
+                ry = float(cords.get("y"))
+            except (TypeError, ValueError):
+                continue
+
+            ent_id = receiver_state_map.get(receiver["entity_id"])
+            if not ent_id:
+                ent_id = (
+                    f"sensor.{eids['entity']}_distance_to_"
+                    f"{receiver['entity_id']}"
                 )
-            rec_value = hass.states.get(entity_id)
-            if rec_value is not None:
-                try:
-                    raw_distance = float(rec_value.state)
-                    calibration = receiver.get("calibration", {})
-                    cal_factor = float(calibration.get("factor", 1.0))
-                    cal_offset = float(calibration.get("offset", 0.0))
+            state = hass.states.get(ent_id)
+            if state is None:
+                continue
+            try:
+                raw_m = float(state.state)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(raw_m) or raw_m <= 0:
+                continue
 
-                    corrected_distance = (raw_distance * cal_factor) + cal_offset
-                    corrected_distance = max(corrected_distance, 0.0)
+            corrected_m = apply_calibration(raw_m, receiver.get("calibration"))
+            smoother_key = f"{floor_name}::{receiver['entity_id']}"
+            smoother = smoothers.setdefault(smoother_key, DistanceSmoother())
+            smoothed_m, sigma_m, _accepted = smoother.push(corrected_m)
+            if smoothed_m is None or smoothed_m <= 0:
+                continue
 
-                    radius = float(floor_scale) * corrected_distance
-                    receiver["cords"]["r"] = radius
-                except (TypeError, ValueError):
-                    # _LOGGER.info(f"Invalid numerical value: {rec_value.state}")
-                    pass
-            else:
-                # _LOGGER.info(f"Entity had no value: {receiver['entity_id']}")
-                pass
+            radius_px = smoothed_m * scale
+            sigma_px = max(2.0, sigma_m * scale)
+            samples.append(
+                DistanceSample(
+                    receiver_id=receiver["entity_id"],
+                    x=rx,
+                    y=ry,
+                    raw_distance_m=raw_m,
+                    distance_m=smoothed_m,
+                    radius_px=radius_px,
+                    sigma_px=sigma_px,
+                )
+            )
+            cords["r"] = radius_px
+
+        if samples:
+            buckets[floor_name] = {
+                "samples": samples,
+                "walls": floor.get("walls", []),
+                "wall_penalty_px": wall_penalty_px,
+                "scale": scale,
+            }
+
+    return buckets
 
 
-async def update_trilateration_and_zone(hass, new_global_data, entity):
-    """Trilateration with r-value filtering and moving average filtering."""
+def _select_active_floor(buckets: dict[str, dict]) -> str | None:
+    best_name = None
+    best_min_r = float("inf")
+    for name, bucket in buckets.items():
+        min_r = min(s.radius_px for s in bucket["samples"])
+        if min_r < best_min_r:
+            best_min_r = min_r
+            best_name = name
+    return best_name
+
+
+def _hdop_to_quality(hdop: float) -> str:
+    if not math.isfinite(hdop):
+        return "poor"
+    if hdop < 1.5:
+        return "good"
+    if hdop < 3.0:
+        return "fair"
+    return "poor"
+
+
+async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
+    """Robust trilateration + Kalman smoothing + opportunistic auto-calibration."""
     global apitricords
-    filter_percent = 0.5  # 50% change in r-value
-    filter_value_high = 1 * (1 + filter_percent)
-    filter_value_low = 1 * (1 - filter_percent)
 
-    # Store last r-values per sensor and entity
-    if not hasattr(update_trilateration_and_zone, "last_r_values"):
-        update_trilateration_and_zone.last_r_values = {}
-    # Store last positions for moving average filtering
-    if not hasattr(update_trilateration_and_zone, "position_history"):
-        update_trilateration_and_zone.position_history = {}
+    engine = _get_engine_state(entity)
+    buckets = _build_floor_buckets(hass, eids, engine)
+    if not buckets:
+        return
 
-    lowest_floor_name, filtered_cords, walls, wall_penalty = extract_floor_and_receivers(
-        new_global_data, entity
+    floor_name = _select_active_floor(buckets)
+    if floor_name is None:
+        return
+    bucket = buckets[floor_name]
+    samples = bucket["samples"]
+    if len(samples) < 3:
+        return
+
+    fit = trilaterate_robust(
+        samples,
+        walls=bucket["walls"],
+        wall_penalty_px=bucket["wall_penalty_px"],
     )
-    # filtered_cords: list of (x, y, r)
+    if fit is None or not fit["converged"]:
+        return
 
-    # Get previous r-values for this entity
-    last_r = update_trilateration_and_zone.last_r_values.get(entity, {})
+    now = time.monotonic()
+    median_sigma_px = float(np.median([s.sigma_px for s in samples]))
+    meas_var = max(1.0, (fit["hdop"] * median_sigma_px) ** 2)
+    kalman: PositionKalman = engine["kalman"]
+    smoothed = kalman.update(np.array([fit["x"], fit["y"]]), now, meas_var)
+    avg_x, avg_y = float(smoothed[0]), float(smoothed[1])
 
-    # Filter out points where r has changed too much
-    filtered = []
-    for idx, (x, y, r) in enumerate(filtered_cords):
-        key = (x, y)  # or receiver-id if available
-        prev_r = last_r.get(key)
-        if prev_r is not None:
-            if r > prev_r * filter_value_high or r < prev_r * filter_value_low:
-                continue  # skip this point
-        filtered.append((x, y, r))
+    # Stationarity-driven self-calibration: if we've been still long enough,
+    # the true distance to each receiver is just |position - receiver|.
+    stationary = engine["stationary"].push(now, avg_x, avg_y)
+    if stationary is not None:
+        cx, cy, _dur = stationary
+        scale = bucket["scale"] or 1.0
+        for s in samples:
+            true_m = math.hypot(s.x - cx, s.y - cy) / scale
+            calib = engine["autocal"].setdefault(
+                s.receiver_id, AutoCalibrator()
+            )
+            calib.add(s.raw_distance_m, true_m)
+            fit_cal = calib.fit()
+            if fit_cal is not None:
+                engine["last_fits"][s.receiver_id] = fit_cal
 
-    # Store current r-values for next time
-    update_trilateration_and_zone.last_r_values[entity] = {
-        (x, y): r for (x, y, r) in filtered_cords
+    point = Point(avg_x, avg_y)
+    zone = find_zone_for_point(new_global_data, entity, floor_name, point)
+
+    quality = {
+        "hdop": round(fit["hdop"], 3),
+        "rms_residual_px": round(fit["rms_residual_px"], 2),
+        "n_used": fit["n_used"],
+        "speed_px_per_s": round(kalman.speed, 2),
+        "stationary": stationary is not None,
+        "label": _hdop_to_quality(fit["hdop"]),
     }
+    engine["quality"] = quality
 
-    if len(filtered) < 3:
-        # Fallback: if r-change filtering is too aggressive, use raw points.
-        if len(filtered_cords) >= 3:
-            filtered = list(filtered_cords)
-        else:
-            return
-
-    tricords = trilaterate(
-        filtered, walls=walls, wall_penalty=wall_penalty
+    apitricords = update_or_add_entry(
+        apitricords,
+        {
+            "ent": entity,
+            "cords": [avg_x, avg_y],
+            "zone": zone,
+            "floor": floor_name,
+            "quality": quality,
+        },
     )
-    if tricords is not None:
-        # Moving average filtering
-        history = update_trilateration_and_zone.position_history.setdefault(
-            entity, []
-        )
-        history.append(tricords)
-        if len(history) > 3:  # Keep only the last 3 positions
-            history.pop(0)
-        avg_x = sum(pos[0] for pos in history) / len(history)
-        avg_y = sum(pos[1] for pos in history) / len(history)
-
-        test_point = Point(float(avg_x), float(avg_y))
-        zone = find_zone_for_point(
-            new_global_data, entity, lowest_floor_name, test_point
-        )
-        apitricords = update_or_add_entry(
-            apitricords,
-            {"ent": entity, "cords": [avg_x, avg_y], "zone": zone},
-        )
-        await update_apitricords(hass, apitricords)
-        hass.states.async_set(f"sensor.{entity}_bps_zone", zone)
-        hass.states.async_set(f"sensor.{entity}_bps_floor", lowest_floor_name)
+    await update_apitricords(hass, apitricords)
+    hass.states.async_set(f"sensor.{entity}_bps_zone", zone)
+    hass.states.async_set(f"sensor.{entity}_bps_floor", floor_name)
+    hass.states.async_set(
+        f"sensor.{entity}_bps_quality",
+        quality["label"],
+        {
+            "hdop": quality["hdop"],
+            "n_used": quality["n_used"],
+            "rms_residual_px": quality["rms_residual_px"],
+            "speed_px_per_s": quality["speed_px_per_s"],
+            "stationary": quality["stationary"],
+        },
+    )
 
 
 def update_or_add_entry(data, new_entry):
@@ -445,11 +560,10 @@ async def update_apitricords(hass, new_data):
 
 
 async def process_single_entity(hass, new_global_data, eids):
-    """Process a single entity: first receivers, then trilateration"""
-    await update_receiver_radii(hass, eids)  # Wait for the receivers to update
+    """Drive the positioning engine for a single tracked entity."""
     await update_trilateration_and_zone(
-        hass, new_global_data, eids["entity"]
-    )  # When it is complete → perform trilateration
+        hass, new_global_data, eids["entity"], eids
+    )
 
 
 async def process_entities(hass, new_global_data):
@@ -461,64 +575,6 @@ async def process_entities(hass, new_global_data):
     await asyncio.gather(
         *tasks
     )  # Run all entities in parallel, but maintain the correct internal order
-
-
-def extract_floor_and_receivers(new_global_data, tmpentity):
-    """Find floor with closest receiver and return points + wall model."""
-    floor_points = {}
-    floor_min_r = {}
-    floor_walls = {}
-    floor_wall_penalty = {}
-
-    for entity in new_global_data:
-        if entity["entity"] != tmpentity:
-            continue
-
-        for floor in entity["data"]["floor"]:
-            floor_name = floor.get("name")
-            if floor_name is None:
-                continue
-
-            points = []
-            min_r = float("inf")
-
-            for receiver in floor.get("receivers", []):
-                cords = receiver.get("cords", {})
-                x = cords.get("x")
-                y = cords.get("y")
-                r = cords.get("r")
-                if x is None or y is None or r is None:
-                    continue
-                try:
-                    r_val = float(r)
-                except (TypeError, ValueError):
-                    continue
-                if r_val <= 0:
-                    continue
-                points.append((float(x), float(y), r_val))
-                if r_val < min_r:
-                    min_r = r_val
-
-            if points:
-                floor_points[floor_name] = points
-                floor_min_r[floor_name] = min_r
-                floor_walls[floor_name] = floor.get("walls", [])
-                try:
-                    penalty = float(floor.get("wall_penalty", 2.5))
-                except (TypeError, ValueError):
-                    penalty = 2.5
-                floor_wall_penalty[floor_name] = max(0.0, penalty)
-
-    if not floor_min_r:
-        return None, [], [], 0.0
-
-    lowest_floor_name = min(floor_min_r, key=floor_min_r.get)
-    return (
-        lowest_floor_name,
-        floor_points.get(lowest_floor_name, []),
-        floor_walls.get(lowest_floor_name, []),
-        floor_wall_penalty.get(lowest_floor_name, 0.0),
-    )
 
 
 def find_zone_for_point(data, entity, floor_name, point):
@@ -582,6 +638,7 @@ async def async_setup(hass: HomeAssistant, config):
             hass.http.register_view(BPSReadAPIText())
             hass.http.register_view(BPSFrontendConfigAPI())
             hass.http.register_view(BPSDistanceValueAPI())
+            hass.http.register_view(BPSDiagnosticsAPI())
             hass.http.register_view(BPSCordsAPI(hass))
             hass.data[views_flag_key] = True
 
@@ -1011,6 +1068,33 @@ class BPSDistanceValueAPI(HomeAssistantView):
         )
 
 
+class BPSDiagnosticsAPI(HomeAssistantView):
+    """Expose engine quality metrics + auto-calibration suggestions."""
+
+    url = "/api/bps/diagnostics"
+    name = "api:bps:diagnostics"
+    requires_auth = False
+
+    async def get(self, request):
+        target = request.query.get("entity")
+        out: dict[str, dict] = {}
+        items = (
+            [(target, _engine_state[target])]
+            if target and target in _engine_state
+            else _engine_state.items()
+        )
+        for entity, state in items:
+            out[entity] = {
+                "quality": state.get("quality", {}),
+                "calibration_suggestions": dict(state.get("last_fits", {})),
+                "samples_collected": {
+                    rid: len(cal.samples)
+                    for rid, cal in state.get("autocal", {}).items()
+                },
+            }
+        return web.json_response(out)
+
+
 class BPSCordsAPI(HomeAssistantView):
     """API för att skicka tillbaka apitricords"""
 
@@ -1321,81 +1405,35 @@ class BPSEntityWebSocket:
         _LOGGER.info("All WebSocket commands registered successfully.")
 
 
-# Trilateration function
-def _parse_wall_segments(raw_walls):
-    """Convert persisted wall data into usable line segments."""
-    segments = []
-    for wall in raw_walls or []:
-        try:
-            x1 = float(wall.get("x1"))
-            y1 = float(wall.get("y1"))
-            x2 = float(wall.get("x2"))
-            y2 = float(wall.get("y2"))
-        except (TypeError, ValueError, AttributeError):
-            continue
-        if x1 == x2 and y1 == y2:
-            continue
-        segments.append(LineString([(x1, y1), (x2, y2)]))
-    return segments
-
-
-def _count_wall_crossings(path: LineString, wall_segments: list[LineString]) -> int:
-    """Count wall intersections excluding degenerate collinear overlaps."""
-    crossings = 0
-    for wall in wall_segments:
-        if not path.intersects(wall):
-            continue
-        intersection = path.intersection(wall)
-        if intersection.is_empty:
-            continue
-        if intersection.geom_type in ("LineString", "MultiLineString"):
-            # Path aligned with a wall; ignore to avoid over-penalizing.
-            continue
-        crossings += 1
-    return crossings
-
-
 def trilaterate(known_points, walls=None, wall_penalty: float = 0.0):
-    num_points = len(known_points)
+    """Legacy adapter retained for the WebSocket `bps/known_points` API.
 
-    if num_points < 3:
-        # Make sure there are enough points (min 3) to do a trilateration
-        _LOGGER.error(
-            "At least three known points are required for trilateration."
-        )
+    Forwards to the robust engine using a flat per-point sigma so callers
+    that lack noise estimates still benefit from soft-L1 outlier rejection,
+    1/r² seeding and HDOP-aware fitting.
+    """
+    if len(known_points) < 3:
+        _LOGGER.error("At least three known points are required for trilateration.")
         return None
 
-    wall_segments = _parse_wall_segments(walls)
-    penalty = max(0.0, float(wall_penalty or 0.0))
-
-    def objective_function(X, known_points):
-        # Define the objective function loss for the least squares method.
-        x, y = X
-        residuals = []
-        for xi, yi, ri in known_points:
-            line_distance = np.sqrt((xi - x) ** 2 + (yi - y) ** 2)
-            if wall_segments and penalty > 0:
-                path = LineString([(x, y), (xi, yi)])
-                crossings = _count_wall_crossings(path, wall_segments)
-            else:
-                crossings = 0
-            effective_distance = line_distance + (crossings * penalty)
-            residual = effective_distance - ri
-            residuals.append(residual)
-        weights = 1.0 / np.array([ri**2 for _, _, ri in known_points])
-        return np.sqrt(weights) * np.array(residuals)
-
-    # Initial guess value for unknown coordinates
-    x0 = np.array([0, 0])
-
-    # Perform weighting adjustment for the least squares method.
-    result = least_squares(objective_function, x0, args=(known_points,))
-
-    if not result.success:
-        # Check if the fitting was successful
-        _LOGGER.error(
-            "Weighted nonlinear least squares fitting did not converge."
+    samples = [
+        DistanceSample(
+            receiver_id=str(idx),
+            x=float(xi),
+            y=float(yi),
+            raw_distance_m=float(ri),
+            distance_m=float(ri),
+            radius_px=float(ri),
+            sigma_px=max(2.0, 0.05 * float(ri)),
         )
+        for idx, (xi, yi, ri) in enumerate(known_points)
+    ]
+    fit = trilaterate_robust(
+        samples,
+        walls=walls,
+        wall_penalty_px=max(0.0, float(wall_penalty or 0.0)),
+    )
+    if fit is None or not fit["converged"]:
+        _LOGGER.error("Robust trilateration did not converge.")
         return None
-    x, y = result.x  # Extract the calculated coordinates
-    return x, y  # return the result
+    return fit["x"], fit["y"]

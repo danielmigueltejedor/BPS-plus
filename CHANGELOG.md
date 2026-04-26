@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0] - 2026-04-26
+- New positioning engine (`positioning.py`):
+  - robust weighted nonlinear-least-squares trilateration with soft-L1 loss,
+  - 1/r² weighted-centroid initial guess (replaces (0, 0)),
+  - HDOP-equivalent quality metric from solver Jacobian,
+  - RANSAC-lite refit that drops the worst residual when above 6σ.
+- Per-link `DistanceSmoother` with EWMA + MAD outlier rejection (replaces ±50% gate).
+- Constant-velocity 2D Kalman filter (`PositionKalman`) with measurement variance derived from HDOP.
+- Stationarity detector + opportunistic auto-calibrator that learns `factor·raw + offset` per receiver from rest-state samples.
+- Calibration model extended to `factor·raw^exp + offset` (exponent optional, defaults to 1 for backwards compatibility).
+- Wall-penalty unit bug fixed: meters are now converted to pixels via the floor scale before being added to residuals.
+- New diagnostic API `GET /api/bps/diagnostics` exposing per-entity quality, sample counts, and calibration suggestions.
+- New `sensor.<entity>_bps_quality` exposing label (good/fair/poor) plus HDOP, n_used, RMS residual, speed, and stationary state.
+
 ## [1.5.6] - 2026-02-09
 - Forced visible verification update:
   - frontend header now shows `v1.5.6`,
