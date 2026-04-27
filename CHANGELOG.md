@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.5] - 2026-04-28
+- Distance entities now read **"Distance to <Proxy Friendly Name>"**
+  instead of **"Distance to <proxy MAC slug>"**. The receiver id used
+  as the canonical key in `discover_distance_entities` is the
+  device-registry-derived slug (e.g. `bluetooth_proxy_cocina`) and
+  the sensor `_attr_name` carries the proxy's actual friendly name
+  pulled from a per-discovery `receiver_friendly_names` cache.
+- Existing MAC-slug sensors are superseded on next discovery; the
+  startup cleanup pass already removes orphans.
+
+## [1.7.4] - 2026-04-28
+- Fix: distance estimates exploding to thousands of metres. iPhones (and
+  many other devices) report `0` or `+12` dBm in the advertising
+  `tx_power` field — that's the radiated power, not the calibrated
+  RSSI@1m the path-loss model expects. With `tx_power=0` and a typical
+  indoor RSSI of ~-90 dBm, `d = 10^(90/25) ≈ 3980 m`. Advertised
+  `tx_power` is now only trusted when it falls in the plausible
+  RSSI@1m window (-90 dBm .. -30 dBm); otherwise BPS+ keeps the
+  default and lets the stationarity-driven fitter dial it in.
+- Distances above 80 m are now dropped at the scanner output rather
+  than fed into trilateration as garbage.
+- `STALE_AFTER` raised from 30 s to 90 s so that iPhones/Apple Watches
+  in standby (advertising every ~1-2 s) actually accumulate sightings
+  across the >=3 proxies the engine needs.
+- Sensor cleanup: managed sensors whose visible name is just a
+  colon-separated MAC (legacy from earlier versions before the
+  friendly-name filter landed) are now removed on startup. Frontend
+  filter also rejects targets whose only "name" is a MAC string, so
+  no new ones are created.
+
 ## [1.7.3] - 2026-04-27
 - Fix: chicken-and-egg in the positioning loop. Discovery (and the
   `BleScanner.set_alias()` call that maps a `private_ble_device` rotating

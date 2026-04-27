@@ -99,7 +99,16 @@ def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
             if target_id in friendly and state.state in ("unknown", "unavailable", None):
                 zombie = True
 
+        # MAC-named leftover from earlier versions: friendly_name itself
+        # is just a colon-separated MAC. Sweep these on every restart so
+        # they don't pollute the device list under their HW address.
+        mac_named = False
         if not malformed and not zombie:
+            friendly_first = str(attrs.get("friendly_name") or "").split(" ")[0].strip()
+            if re.fullmatch(r"[0-9A-Fa-f]{2}(?:[:_-][0-9A-Fa-f]{2}){5}", friendly_first):
+                mac_named = True
+
+        if not malformed and not zombie and not mac_named:
             continue
 
         if entity_registry.async_get(state.entity_id) is not None:
@@ -122,13 +131,18 @@ class BpsDistanceSensor(SensorEntity):
         target_id: str,
         receiver_id: str,
         display_name: str,
+        receiver_display_name: str | None = None,
     ) -> None:
         self.hass = hass
         self._target_id = target_id
         self._receiver_id = receiver_id
         self._display_name = display_name
+        self._receiver_display_name = receiver_display_name or receiver_id
         self._attr_unique_id = f"{DOMAIN}_distance_{target_id}_{receiver_id}"
-        self._attr_name = f"{display_name} distance to {receiver_id}"
+        # _attr_has_entity_name=True means HA composes
+        # "<device_name> <_attr_name>" so this string must be
+        # entity-specific only.
+        self._attr_name = f"Distance to {self._receiver_display_name}"
         self._attr_native_value = None
         self._source_entity_id: str | None = None
         self._cached_reading: dict | None = None
@@ -215,6 +229,9 @@ async def async_setup_entry(
         target_name_map = {
             item["id"]: item.get("name") or item["id"] for item in entity_options
         }
+        receiver_friendly = (
+            hass.data.get(DOMAIN, {}).get("receiver_friendly_names") or {}
+        )
 
         # Restrict receivers to those the user actually placed on a map.
         # Otherwise we'd cross-multiply every BLE proxy with every visible
@@ -237,14 +254,17 @@ async def async_setup_entry(
             return
 
         # Only materialise sensors for targets that have a friendly name
-        # distinct from the bare MAC token. Drops random rotating Apple
-        # chaff that has no name and would only ever be "desconocido".
+        # distinct from the bare MAC token AND not just a MAC string.
+        # Drops random rotating Apple chaff and devices whose only "name"
+        # is their colon-separated MAC.
+        mac_re = re.compile(r"^[0-9A-Fa-f]{2}(?:[:_-][0-9A-Fa-f]{2}){5}$")
         meaningful_targets = [
             target_id
             for target_id, receiver_map in canonical_map.items()
             if receiver_map
             and target_name_map.get(target_id)
             and target_name_map[target_id] != target_id
+            and not mac_re.match(target_name_map[target_id].strip())
         ]
 
         new_entities: list[Entity] = []
@@ -266,6 +286,7 @@ async def async_setup_entry(
                     target_id=target_id,
                     receiver_id=receiver_id,
                     display_name=target_name_map.get(target_id, target_id),
+                    receiver_display_name=receiver_friendly.get(receiver_id),
                 )
                 managed[key] = sensor
                 new_entities.append(sensor)

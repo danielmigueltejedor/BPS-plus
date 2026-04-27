@@ -37,7 +37,8 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TX_POWER = -59.0   # typical iBeacon RSSI at 1 m
 DEFAULT_PATH_LOSS = 2.5    # indoor mixed environment
-STALE_AFTER = 30.0         # seconds after which a link is considered dead
+STALE_AFTER = 90.0         # seconds after which a link is considered dead
+DISTANCE_CAP_M = 80.0      # readings above this are multipath garbage; drop
 MIN_FIT_SAMPLES = 5
 MAX_FIT_SAMPLES = 60
 
@@ -195,8 +196,15 @@ class BleScanner:
                 meta.name = str(adv_name)
             if not meta.name:
                 meta.name = identity
+            # Many devices (iPhones in particular) report 0 or 12 dBm in
+            # advertising, which is the raw radiated power, not the
+            # calibrated RSSI at 1 m the path-loss model expects. Using
+            # those values produces 1000s-of-metres distance estimates.
+            # Only trust the adv field when it's in the plausible RSSI@1m
+            # window. Otherwise leave tx_power at DEFAULT_TX_POWER and let
+            # the stationarity-driven fitter dial it in.
             tx_adv = getattr(service_info, "tx_power", None)
-            if tx_adv is not None and -127 <= tx_adv <= 20:
+            if tx_adv is not None and -90 <= tx_adv <= -30:
                 meta.tx_power_adv = float(tx_adv)
             meta.last_seen = now
 
@@ -395,7 +403,7 @@ class BleScanner:
         if time.monotonic() - link.last_seen > max_age:
             return None
         d = rssi_to_distance(link.rssi_ewma, link.tx_power, link.path_loss)
-        if not math.isfinite(d):
+        if not math.isfinite(d) or d > DISTANCE_CAP_M:
             return None
         return {
             "distance_m": d,

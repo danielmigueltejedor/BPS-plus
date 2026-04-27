@@ -39,7 +39,12 @@ from .positioning import (
     apply_calibration,
     trilaterate_robust,
 )
-from .ble_scanner import BleScanner, mac_to_token, normalize_mac as scanner_normalize_mac
+from .ble_scanner import (
+    BleScanner,
+    mac_to_token,
+    normalize_mac as scanner_normalize_mac,
+    slugify as scanner_slugify,
+)
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
@@ -254,13 +259,29 @@ def discover_distance_entities(hass: HomeAssistant):
 
     scanners_list = scanner.known_scanners()
 
+    # Receiver-id table built once per discovery. Prefers the friendly
+    # slug from the proxy's device-registry name (e.g. `bluetooth_proxy_cocina`)
+    # over the bare MAC slug so user-facing entity names read
+    # "Distance to bluetooth_proxy_cocina" instead of "Distance to b4_e6_2d_..".
+    # Keep a parallel friendly-name map for the sensor display layer.
+    receiver_id_table: list[tuple[str, str]] = []
+    receiver_friendly: dict[str, str] = {}
+    for sc in scanners_list:
+        friendly_slug = scanner_slugify(sc.name) if sc.name else ""
+        receiver_id = (
+            friendly_slug
+            or mac_to_token(sc.source)
+            or sc.source.lower().replace(":", "_")
+        )
+        receiver_id_table.append((receiver_id, sc.source))
+        receiver_friendly[receiver_id] = sc.name or sc.source
+
+    hass.data.setdefault(DOMAIN, {})["receiver_friendly_names"] = receiver_friendly
+
     def _build_receiver_map(token: str) -> dict[str, str]:
         return {
-            (mac_to_token(sc.source) or sc.source.lower()): (
-                f"sensor.bps_{token}_distance_to_"
-                f"{mac_to_token(sc.source) or sc.source.lower()}"
-            )
-            for sc in scanners_list
+            receiver_id: f"sensor.bps_{token}_distance_to_{receiver_id}"
+            for receiver_id, _src in receiver_id_table
         }
 
     # Stable / IRK-resolved targets first. Push the alias into the
