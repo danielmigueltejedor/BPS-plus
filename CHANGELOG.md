@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.3] - 2026-04-27
+- Fix: chicken-and-egg in the positioning loop. Discovery (and the
+  `BleScanner.set_alias()` call that maps a `private_ble_device` rotating
+  MAC to its stable identity) was gated behind the candidate check, but
+  no rotating-MAC device could ever reach >=3 scanner sightings without
+  the alias. Net effect: iPhones / Apple Watches showed up in the panel
+  selector but never produced distances and the auto-calibrator never
+  collected samples ("Pro: calibrados 0/5"). Discovery + alias setup
+  now run on every tick before the candidate threshold is checked.
+- Diagnostic log line now also reports the number of stable aliases
+  currently active.
+
 ## [1.7.2] - 2026-04-27
 - Fix: sidebar panel disappeared after a config-entry reload (and after
   any HACS upgrade since 1.7.x). `async_unload_entry` removed the panel

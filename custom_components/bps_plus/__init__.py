@@ -405,20 +405,28 @@ async def update_tracked_entities(hass, _unused=None):
                 await asyncio.sleep(5)
                 continue
 
+            # Discovery + alias setup MUST run every tick before checking
+            # candidates. Otherwise rotating-MAC devices (Apple Watch,
+            # iPhones via private_ble_device) never get aliased to a
+            # stable identity, their advertisements stay scattered across
+            # short-lived MACs and they never accumulate >=3 scanner
+            # sightings — chicken-and-egg.
+            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
+            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
+
             candidates = scanner.candidate_targets(min_scanners=3)
             tracked_entities = candidates
 
             if len(candidates) < 1:
                 _LOGGER.debug(
                     "No BLE devices currently visible to >=3 proxies "
-                    "(known devices=%d, scanners=%d)",
-                    len(scanner.devices), len(scanner.scanners),
+                    "(known devices=%d, scanners=%d, stable aliases=%d)",
+                    len(scanner.devices),
+                    len(scanner.scanners),
+                    sum(1 for k in target_metadata.values() if k.get("is_alias")),
                 )
                 await asyncio.sleep(5)
                 continue
-
-            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
-            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
 
             candidate_set = set(candidates)
             new_global_data = [
