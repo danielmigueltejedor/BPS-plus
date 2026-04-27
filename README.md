@@ -1,6 +1,6 @@
-# 📍 BLE Positioning System Plus (BPS-plus) for Home Assistant
+# 📍 BLE Positioning System Plus (BPS+) for Home Assistant
 
-![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.7.2-blue.svg)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=home-assistant)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-experimental-orange.svg)
@@ -96,7 +96,7 @@ Reinicia Home Assistant.
 ## ⚙️ Configuración
 
 1. **Ajustes → Dispositivos y servicios → Añadir integración**
-2. Buscar: **BPS-plus**
+2. Buscar: **BPS+**
 3. Seleccionar dispositivos BLE detectados por Bermuda
 4. Ajustar parámetros internos
 5. Guardar
@@ -133,7 +133,7 @@ En el panel lateral, sección **Calibración**:
 
 ### Detección automática BLE
 
-- BPS-plus detecta automáticamente dispositivos BLE y `bt proxy` desde entidades `_distance_to_`.
+- BPS+ detecta automáticamente dispositivos BLE y `bt proxy` desde entidades `_distance_to_`.
 - Para dispositivos con MAC privada rotativa, usa metadatos de Home Assistant (`source_type: bluetooth_le`, `current_address`, `source`, `friendly_name`) para mantener una identidad estable.
 - En la UI, el selector de dispositivos muestra nombre amigable cuando está disponible.
 - Al colocar receptores, el campo sugiere automáticamente proxies detectados.
@@ -207,7 +207,7 @@ action:
 - **[@danielmigueltejedor](https://github.com/danielmigueltejedor)**  
 - Repositorio: https://github.com/danielmigueltejedor/BPS-plus  
 - Licencia: MIT  
-- Versión: 1.7.0
+- Versión: 1.7.2
 
 ---
 
@@ -224,9 +224,9 @@ La precisión depende de la posición de los bluetooth_proxy, interferencias y e
 
 ## Licencia
 
-BPS-Plus es un fork del proyecto [BPS](https://github.com/Hogster/BPS) de Hogster, 
+BPS+ es un fork del proyecto [BPS](https://github.com/Hogster/BPS) de Hogster, 
 licenciado bajo MIT.  
-Las modificaciones y extensiones de BPS-Plus están también bajo licencia MIT.
+Las modificaciones y extensiones de BPS+ están también bajo licencia MIT.
 
 ---
 

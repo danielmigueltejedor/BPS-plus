@@ -1,4 +1,4 @@
-"""BPS-Plus native BLE distance engine.
+"""BPS+ native BLE distance engine.
 
 Subscribes to every BLE advertisement HA's bluetooth integration sees
 (local adapters + ESPHome / Shelly bluetooth proxies) and turns each
@@ -17,7 +17,7 @@ is detected as stationary, its (smoothed) position is the ground truth
 and the true distance to each proxy is `|pos - proxy|`. Pairing that
 with the observed RSSI gives a training sample we feed back here.
 
-Result: BPS-Plus no longer needs Bermuda or any external integration to
+Result: BPS+ no longer needs Bermuda or any external integration to
 compute distances — it owns the full BLE → distance → trilateration
 pipeline.
 """
@@ -156,7 +156,7 @@ class BleScanner:
             _LOGGER.error("Failed to subscribe to bluetooth advertisements: %s", err)
             return False
 
-        _LOGGER.info("BPS-Plus native BLE scanner active")
+        _LOGGER.info("BPS+ native BLE scanner active")
         return True
 
     def stop(self) -> None:

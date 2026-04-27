@@ -17,7 +17,7 @@ from .const import (
 
 
 class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Config flow para BPS-Plus."""
+    """Config flow para BPS+."""
 
     VERSION = 1
 
@@ -45,7 +45,7 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
 
                 return self.async_create_entry(
-                    title="BPS-Plus",
+                    title="BPS+",
                     data={
                         CONF_BASE_URL: base_url,
                         CONF_TOKEN: token,
@@ -70,7 +70,7 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class BpsPlusOptionsFlow(config_entries.OptionsFlow):
-    """Opciones de BPS-Plus."""
+    """Opciones de BPS+."""
 
     def __init__(self, entry):
         self.entry = entry

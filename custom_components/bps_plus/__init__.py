@@ -754,22 +754,50 @@ def find_zone_for_point(data, entity, floor_name, point):
     return "unknown"
 
 
+def _ensure_panel(hass: HomeAssistant) -> None:
+    """Idempotently (re-)register the BPS+ sidebar panel.
+
+    Called from `async_setup_entry` on every load — including reloads —
+    because `async_unload_entry` removes the panel and the one-shot
+    init flag in `async_setup` prevents the legacy register-on-init path
+    from running again on the next entry setup.
+    """
+    panels = hass.data.get("frontend_panels", {})
+    if "bps" in panels:
+        try:
+            async_remove_panel(hass, "bps")
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("Could not remove existing BPS+ panel: %s", err)
+    try:
+        async_register_built_in_panel(
+            hass=hass,
+            component_name="iframe",
+            sidebar_title="BPS+",
+            sidebar_icon="mdi:map",
+            frontend_url_path="bps",
+            config={"url": "/bps/index.html"},
+        )
+        _LOGGER.info("BPS+ panel registered")
+    except Exception as err:
+        _LOGGER.error("Failed to register BPS+ panel: %s", err)
+
+
 async def async_setup(hass: HomeAssistant, config):
-    """Set up the BPS-Plus integration."""
-    _LOGGER.info("BPS-Plus integration initialized.")
+    """Set up the BPS+ integration."""
+    _LOGGER.info("BPS+ integration initialized.")
 
     # Usamos una flag con el DOMAIN para no inicializar dos veces
     init_flag_key = f"{DOMAIN}_initialized"
 
     if hass.data.get(init_flag_key, False):
-        _LOGGER.warning("BPS-Plus has already been initialized. Aborting")
+        _LOGGER.warning("BPS+ has already been initialized. Aborting")
         return True  # Abort if already running
 
     hass.data[init_flag_key] = True  # Set flag
 
     async def initialize_bps():
-        """Initialize the BPS-Plus component"""
-        _LOGGER.info("Initializing BPS-Plus...")
+        """Initialize the BPS+ component"""
+        _LOGGER.info("Initializing BPS+...")
 
         # Registrar vistas REST solo una vez
         views_flag_key = f"{DOMAIN}_views_registered"
@@ -807,23 +835,9 @@ async def async_setup(hass: HomeAssistant, config):
             )
             return
 
-        # Panel lateral (iframe) en HA
-        panels = hass.data.get("frontend_panels", {})
-        if "bps" in panels:
-            async_remove_panel(hass, "bps")
-        try:
-            _LOGGER.debug("Registering the built-in panel for BPS-Plus...")
-            async_register_built_in_panel(
-                hass=hass,
-                component_name="iframe",
-                sidebar_title="BPS-Plus",
-                sidebar_icon="mdi:map",
-                frontend_url_path="bps",
-                config={"url": "/bps/index.html"},
-            )
-            _LOGGER.info("Panel registered successfully.")
-        except Exception as e:
-            _LOGGER.error(f"Failed to register panel: {e}")
+        # Panel registration was moved out of initialize_bps so a reload
+        # of the config entry can re-attach the sidebar — see _ensure_panel
+        # below, called from async_setup_entry on every load.
 
         # Crear fichero bpsdata.txt si no existe
         try:
@@ -862,7 +876,7 @@ async def async_setup(hass: HomeAssistant, config):
                 "homeassistant_stop", lambda event: observer.stop()
             )
 
-        _LOGGER.info("The BPS-Plus integration is fully initialized")
+        _LOGGER.info("The BPS+ integration is fully initialized")
 
     async def handle_homeassistant_started(event):
         """Handles the 'homeassistant_started' event"""
@@ -924,21 +938,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """Set up BPS-Plus from a configuration entry."""
-    _LOGGER.info("async_setup_entry called for BPS-Plus")
+    """Set up BPS+ from a configuration entry."""
+    _LOGGER.info("async_setup_entry called for BPS+")
 
     # Guardamos el entry en hass.data por si hace falta en otras partes
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["config_entry"] = entry
 
-    # Registrar la vista para servir el script.js dinámico de BPS-Plus
+    # Registrar la vista para servir el script.js dinámico de BPS+
     hass.http.register_view(BpsPlusScriptView(hass, entry))
 
     # Configurar sensores (sensor.py)
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
-    # Reutilizamos la inicialización general (panel, APIs, watcher…)
+    # Reutilizamos la inicialización general (APIs, watcher, scanner...).
     await async_setup(hass, {})
+
+    # Sidebar panel must be re-registered on every entry setup, even
+    # when async_setup short-circuits on the init flag (after a reload
+    # async_unload_entry removed the panel).
+    _ensure_panel(hass)
 
     return True
 
@@ -1279,7 +1298,7 @@ class BPSCordsAPI(HomeAssistantView):
 
 
 class BpsPlusScriptView(HomeAssistantView):
-    """Sirve un script.js generado dinámicamente para BPS-Plus."""
+    """Sirve un script.js generado dinámicamente para BPS+."""
 
     url = "/bps-plus/script.js"
     name = "bps_plus:script"
@@ -1318,7 +1337,7 @@ class BpsPlusScriptView(HomeAssistantView):
         except FileNotFoundError:
             return web.Response(
                 status=500,
-                text="// BPS-Plus error: script_template.js no encontrado en custom_components/bps_plus/",
+                text="// BPS+ error: script_template.js no encontrado en custom_components/bps_plus/",
                 content_type="application/javascript",
             )
 

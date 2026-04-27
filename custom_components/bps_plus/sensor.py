@@ -110,7 +110,7 @@ def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
 
 
 class BpsDistanceSensor(SensorEntity):
-    """Distance from one BLE target to one proxy (receiver), owned by BPS-Plus."""
+    """Distance from one BLE target to one proxy (receiver), owned by BPS+."""
 
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "m"
@@ -138,7 +138,7 @@ class BpsDistanceSensor(SensorEntity):
         return DeviceInfo(
             identifiers={(DOMAIN, f"target_{self._target_id}")},
             name=self._display_name,
-            manufacturer="BPS-Plus",
+            manufacturer="BPS+",
             model="BLE Target",
         )
 
@@ -194,8 +194,8 @@ async def async_setup_entry(
     config_entry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up BPS-Plus managed sensors."""
-    _LOGGER.info("Setting up BPS-Plus distance sensors")
+    """Set up BPS+ managed sensors."""
+    _LOGGER.info("Setting up BPS+ distance sensors")
     hass.data.setdefault(DOMAIN, {})
     managed: dict[str, Entity] = hass.data[DOMAIN].setdefault("managed_sensors", {})
     refresh_task: asyncio.Task | None = None
@@ -296,7 +296,7 @@ async def async_setup_entry(
         new_state = event.data.get("new_state")
         attrs = getattr(new_state, "attributes", {})
 
-        # Ignore updates from sensors already managed by BPS-Plus to avoid
+        # Ignore updates from sensors already managed by BPS+ to avoid
         # recursive discovery/add loops under heavy state churn.
         if attrs.get("managed_by") == DOMAIN:
             return

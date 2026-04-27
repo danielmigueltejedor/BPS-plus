@@ -1,4 +1,4 @@
-"""BPS-Plus positioning engine.
+"""BPS+ positioning engine.
 
 Self-contained module that provides:
   * Per-link distance smoothing with MAD-based outlier rejection.

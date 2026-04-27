@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.2] - 2026-04-27
+- Fix: sidebar panel disappeared after a config-entry reload (and after
+  any HACS upgrade since 1.7.x). `async_unload_entry` removed the panel
+  but the next `async_setup_entry` short-circuited inside `async_setup`
+  on the one-shot init flag and never re-registered it. Panel
+  registration is now in a dedicated idempotent helper called from
+  `async_setup_entry` on every load.
+- Branding: user-visible name is now **BPS+** everywhere — sidebar
+  title, manifest, HACS card, README, frontend header, log lines,
+  config-flow title. Internal identifiers (`bps_plus` domain, module
+  paths, route URLs) intentionally unchanged so existing installs and
+  saved maps keep working.
+
 ## [1.7.0] - 2026-04-26
 - Native BLE distance engine (`ble_scanner.py`) replaces the dependency on
   external integrations like Bermuda BLE Trilateration:
