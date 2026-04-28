@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.6] - 2026-04-28
+- Map editor: placing a receiver now shows a dropdown of BT proxies
+  that BPS+ has actually detected, populated from the new
+  `GET /api/bps/scanners` endpoint. Each entry carries the friendly
+  name from HA's device registry and saves the matching slug as the
+  receiver `entity_id`, so users no longer have to type
+  `bluetooth_proxy_cocina` by hand. The free-text input remains as a
+  fallback when no proxies are detected (or all visible ones are
+  already placed on the current floor).
+- Already-placed proxies are filtered out of the dropdown so the same
+  receiver can't be added twice on a single floor.
+
 ## [1.7.5] - 2026-04-28
 - Distance entities now read **"Distance to <Proxy Friendly Name>"**
   instead of **"Distance to <proxy MAC slug>"**. The receiver id used

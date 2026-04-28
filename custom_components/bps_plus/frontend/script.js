@@ -83,6 +83,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     const wallPenaltyPresets = [0.8, 1.6, 2.5, 3.4, 4.5, 6.0];
     let proCalibrationPoint = null;
     let proPickPositionPending = false;
+    // Live BT proxy list, fetched from /api/bps/scanners. Used to fill
+    // the receiver-placement dropdown so users pick a real proxy by
+    // its friendly name instead of typing a slug by hand.
+    let availableScanners = [];
+
+    async function fetchAvailableScanners() {
+        try {
+            const r = await fetch("/api/bps/scanners");
+            if (!r.ok) return [];
+            const data = await r.json();
+            availableScanners = Array.isArray(data) ? data : [];
+            return availableScanners;
+        } catch (_e) {
+            return [];
+        }
+    }
+
+    function getPlacedReceiverIds() {
+        const placed = new Set();
+        const floor = (typeof getCurrentFloor === "function") ? getCurrentFloor() : null;
+        if (floor && Array.isArray(floor.receivers)) {
+            floor.receivers.forEach(r => {
+                if (r && r.entity_id) placed.add(String(r.entity_id));
+            });
+        }
+        return placed;
+    }
 
     const newelement = `
                 <ul class="space-y-2" id="idxxx">
@@ -165,6 +192,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
     
         await loadFrontendConfig();
+        await fetchAvailableScanners();
 
         // Once the maps are loaded, call fetchBPSData
         let tmpsaved = await getSavedMaps();
@@ -1625,7 +1653,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (addDeviceButton.dataset.active === 'false') {
             buttonreset();
-            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instrucciones</h4><p class="text-sm text-gray-500">Coloca los receptores BLE sobre el plano y escribe su identificador. Si Bermuda usa "..._distance_to_bluetooth_proxy_cocina", el receptor sería "bluetooth_proxy_cocina".</p>';
+            messdiv.innerHTML = '<h4 class="font-medium mb-2">Instrucciones</h4><p class="text-sm text-gray-500">Haz click en el plano para colocar un receptor. Aparecerá un desplegable con los BT proxies detectados por BPS+ en tu sistema. Si no se detecta ninguno, podrás escribir el identificador a mano.</p>';
             
             canvas.addEventListener('click', placeReceiver);
             addDeviceButton.setAttribute('data-active', 'true');
@@ -1674,7 +1702,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Placera en BLE mottagare
     // =================================================================
 
-    function placeReceiver(event) {
+    async function placeReceiver(event) {
 
         clearCanvas(); // Remove all drawn elements from canvas
         const x = event.clientX;
@@ -1682,15 +1710,40 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         drawElements(x, y, "receiver");
 
-        if (!entityInput) {
+        // Refresh the live proxy list every placement so a newly-online
+        // proxy appears without reloading the panel.
+        await fetchAvailableScanners();
+        const placedIds = getPlacedReceiverIds();
+        const usable = availableScanners.filter(s => s && s.id && !placedIds.has(s.id));
+
+        // Replace any existing input/select left over from a previous
+        // placement so the dropdown reflects the current state.
+        const old = document.getElementById("receiverName");
+        if (old && old.parentNode) old.parentNode.removeChild(old);
+
+        if (usable.length > 0) {
+            entityInput = document.createElement("select");
+            entityInput.id = "receiverName";
+            entityInput.classList.add("rec-input");
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "Selecciona un BT proxy...";
+            entityInput.appendChild(placeholder);
+            usable.forEach(s => {
+                const opt = document.createElement("option");
+                opt.value = s.id;
+                opt.textContent = s.name || s.id;
+                entityInput.appendChild(opt);
+            });
+        } else {
             entityInput = document.createElement("input");
             entityInput.type = "text";
             entityInput.id = "receiverName";
-            entityInput.placeholder = "Nombre";
+            entityInput.placeholder = "Nombre del proxy";
             entityInput.setAttribute("list", "receiverSuggestions");
             entityInput.classList.add("rec-input");
-            document.body.appendChild(entityInput);
         }
+        document.body.appendChild(entityInput);
 
         const element = document.body;
         const myrect = element.getBoundingClientRect();

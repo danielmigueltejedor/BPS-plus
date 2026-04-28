@@ -837,6 +837,7 @@ async def async_setup(hass: HomeAssistant, config):
             hass.http.register_view(BPSReadAPIText())
             hass.http.register_view(BPSFrontendConfigAPI())
             hass.http.register_view(BPSDistanceValueAPI())
+            hass.http.register_view(BPSScannersAPI())
             hass.http.register_view(BPSBleSnapshotAPI())
             hass.http.register_view(BPSDiagnosticsAPI())
             hass.http.register_view(BPSCordsAPI(hass))
@@ -1255,6 +1256,40 @@ class BPSDistanceValueAPI(HomeAssistantView):
         return web.json_response(
             {"entity_id": entity_id, "value": value}
         )
+
+
+class BPSScannersAPI(HomeAssistantView):
+    """List BT proxies (scanners) the BLE engine currently sees.
+
+    Used by the panel's map editor so placing a receiver becomes a
+    dropdown of real proxies instead of a free-text field. Each entry's
+    `id` is the slug the engine uses internally as the receiver key, so
+    saving the map preserves the friendly slug (e.g. `bluetooth_proxy_cocina`).
+    """
+
+    url = "/api/bps/scanners"
+    name = "api:bps:scanners"
+    requires_auth = False
+
+    async def get(self, request):
+        hass = request.app["hass"]
+        scanner = get_scanner(hass)
+        if scanner is None:
+            return web.json_response([])
+        out = []
+        for sc in scanner.known_scanners():
+            friendly_slug = scanner_slugify(sc.name) if sc.name else ""
+            rid = (
+                friendly_slug
+                or mac_to_token(sc.source)
+                or (sc.source or "").lower().replace(":", "_")
+            )
+            out.append({
+                "id": rid,
+                "name": sc.name or sc.source,
+                "source": sc.source,
+            })
+        return web.json_response(out)
 
 
 class BPSBleSnapshotAPI(HomeAssistantView):
