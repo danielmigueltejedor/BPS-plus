@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.7] - 2026-04-28
+- **Sticky distance values.** Each `BpsDistanceSensor` now keeps its
+  last reading visible during gaps in the advertisement stream instead
+  of bouncing to "desconocido"/"unavailable" between bursts. The
+  sensor only goes unavailable after `CONF_STALE_AFTER` seconds (UI
+  configurable, default 60 s) without any new RSSI sample.
+- **Real-time refresh.** Distance sensors are pushed via a dedicated
+  refresh loop instead of HA's 30 s default poll. Cadence comes from
+  the new `CONF_SCAN_INTERVAL` option (default 2 s, clamped to
+  [0.5 s, 60 s]). Result: `Distance to <Proxy>` updates every couple
+  of seconds while you walk around.
+- New options on the integration's "Configurar" dialog:
+  - `scan_interval` — seconds between sensor refreshes.
+  - `stale_after` — seconds without an advertisement before the
+    distance is considered lost.
+
 ## [1.7.6] - 2026-04-28
 - Map editor: placing a receiver now shows a dropdown of BT proxies
   that BPS+ has actually detected, populated from the new

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
@@ -14,7 +15,13 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_STALE_AFTER,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_STALE_AFTER,
+    DEFAULT_SCAN_INTERVAL,
+)
 from .__init__ import (
     cache_discovery_data,
     discover_distance_entities,
@@ -23,6 +30,21 @@ from .__init__ import (
 from .ble_scanner import normalize_mac as scanner_normalize_mac
 
 _LOGGER = logging.getLogger(__name__)
+
+# HA's default sensor poll interval is 30 s. That's far too slow for a
+# real-time positioning system: the user sees the distance go stale
+# between updates even when the scanner is receiving advertisements
+# every few hundred ms. Override at module level — the actual cadence
+# is reconciled with the user-configurable CONF_SCAN_INTERVAL when the
+# entry is set up.
+SCAN_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+
+
+def _options(hass: HomeAssistant) -> dict:
+    entry = hass.data.get(DOMAIN, {}).get("config_entry")
+    if entry is None:
+        return {}
+    return {**entry.data, **entry.options}
 
 
 def _get_cached_discovery(
@@ -123,7 +145,9 @@ class BpsDistanceSensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_native_unit_of_measurement = "m"
-    _attr_should_poll = True
+    # Driven by the platform refresh loop so the cadence honours
+    # CONF_SCAN_INTERVAL instead of HA's 30 s poll default.
+    _attr_should_poll = False
 
     def __init__(
         self,
@@ -146,6 +170,7 @@ class BpsDistanceSensor(SensorEntity):
         self._attr_native_value = None
         self._source_entity_id: str | None = None
         self._cached_reading: dict | None = None
+        self._cached_reading_ts: float = 0.0
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -180,7 +205,6 @@ class BpsDistanceSensor(SensorEntity):
 
         scanner = get_scanner(self.hass)
         if scanner is None:
-            self._attr_native_value = None
             self._attr_available = False
             return
 
@@ -188,19 +212,41 @@ class BpsDistanceSensor(SensorEntity):
         identity = _resolve_target_identity(self.hass, self._target_id)
         source = scanner.resolve_receiver(self._receiver_id)
         if not identity or not source:
-            self._attr_native_value = None
             self._attr_available = False
             return
 
-        reading = scanner.get_distance(identity, source)
-        if reading is None:
-            self._attr_native_value = None
-            self._attr_available = False
+        opts = _options(self.hass)
+        try:
+            stale_after = float(opts.get(CONF_STALE_AFTER, DEFAULT_STALE_AFTER))
+        except (TypeError, ValueError):
+            stale_after = float(DEFAULT_STALE_AFTER)
+        # Ask the scanner for the reading using the configured stale
+        # window so a brief gap in advertisements does NOT immediately
+        # nuke the sensor to "unknown". The sticky behaviour below keeps
+        # the last value visible until `stale_after` seconds without any
+        # update; only then does the sensor go unavailable.
+        reading = scanner.get_distance(identity, source, max_age=stale_after)
+        now = time.monotonic()
+
+        if reading is not None:
+            self._attr_native_value = round(float(reading["distance_m"]), 2)
+            self._attr_available = True
+            self._cached_reading = reading
+            self._cached_reading_ts = now
             return
 
-        self._attr_native_value = round(float(reading["distance_m"]), 2)
-        self._attr_available = True
-        self._cached_reading = reading
+        # No fresh reading. Keep the previous value if it's still within
+        # the configured stale window — this is what the user wants:
+        # "que no pierda la medida anterior si no detecta anuncios".
+        if (
+            self._cached_reading is not None
+            and (now - self._cached_reading_ts) < stale_after
+        ):
+            self._attr_available = True
+            return
+
+        self._attr_native_value = None
+        self._attr_available = False
 
 
 async def async_setup_entry(
@@ -341,3 +387,44 @@ async def async_setup_entry(
 
     unsub = hass.bus.async_listen(EVENT_STATE_CHANGED, _state_changed)
     config_entry.async_on_unload(unsub)
+
+    # Push-style refresh loop. Polls every CONF_SCAN_INTERVAL seconds
+    # (default 2 s, vs. HA's 30 s) and pushes the result to each
+    # registered sensor via async_write_ha_state. Combined with the
+    # sticky logic in BpsDistanceSensor.async_update this gives
+    # near-real-time distances while surviving brief gaps in the
+    # advertisement stream.
+    stop_event = asyncio.Event()
+
+    async def _refresh_loop() -> None:
+        while not stop_event.is_set():
+            opts = _options(hass)
+            try:
+                interval = float(opts.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
+            except (TypeError, ValueError):
+                interval = float(DEFAULT_SCAN_INTERVAL)
+            interval = max(0.5, min(60.0, interval))
+
+            sensors = [s for s in list(managed.values()) if isinstance(s, BpsDistanceSensor)]
+            for sensor in sensors:
+                if stop_event.is_set():
+                    break
+                try:
+                    await sensor.async_update()
+                    if sensor.hass is not None and sensor.entity_id:
+                        sensor.async_write_ha_state()
+                except Exception as err:
+                    _LOGGER.debug("Sensor refresh error for %s: %s", sensor.entity_id, err)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    refresh_loop_task = hass.async_create_task(_refresh_loop())
+
+    def _cancel_refresh_loop() -> None:
+        stop_event.set()
+        if not refresh_loop_task.done():
+            refresh_loop_task.cancel()
+
+    config_entry.async_on_unload(_cancel_refresh_loop)

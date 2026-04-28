@@ -12,7 +12,11 @@ from .const import (
     CONF_BASE_URL,
     CONF_TOKEN,
     CONF_UPDATE_INTERVAL,
+    CONF_STALE_AFTER,
+    CONF_SCAN_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_STALE_AFTER,
+    DEFAULT_SCAN_INTERVAL,
 )
 
 
@@ -58,6 +62,8 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_BASE_URL): str,
                 vol.Required(CONF_TOKEN): str,
                 vol.Optional(CONF_UPDATE_INTERVAL, default=DEFAULT_UPDATE_INTERVAL): vol.Coerce(int),
+                vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.Coerce(int),
+                vol.Optional(CONF_STALE_AFTER, default=DEFAULT_STALE_AFTER): vol.Coerce(int),
             }
         )
 
@@ -86,7 +92,18 @@ class BpsPlusOptionsFlow(config_entries.OptionsFlow):
             {
                 vol.Required(CONF_BASE_URL, default=options.get(CONF_BASE_URL, data.get(CONF_BASE_URL))): str,
                 vol.Required(CONF_TOKEN, default=options.get(CONF_TOKEN, data.get(CONF_TOKEN))): str,
-                vol.Optional(CONF_UPDATE_INTERVAL, default=options.get(CONF_UPDATE_INTERVAL, data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))): vol.Coerce(int),
+                vol.Optional(
+                    CONF_UPDATE_INTERVAL,
+                    default=options.get(CONF_UPDATE_INTERVAL, data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)),
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_SCAN_INTERVAL,
+                    default=options.get(CONF_SCAN_INTERVAL, data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)),
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_STALE_AFTER,
+                    default=options.get(CONF_STALE_AFTER, data.get(CONF_STALE_AFTER, DEFAULT_STALE_AFTER)),
+                ): vol.Coerce(int),
             }
         )
 
