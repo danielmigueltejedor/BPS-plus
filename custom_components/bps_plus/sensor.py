@@ -82,6 +82,75 @@ def _looks_repeated(value: str) -> bool:
 
 
 _MAC_SLUG_RE = re.compile(r"^[0-9a-f]{2}(_[0-9a-f]{2}){5}$")
+_UNIQUE_ID_PREFIX = f"{DOMAIN}_distance_"
+
+
+def _split_unique_id(unique_id: str) -> tuple[str, str] | None:
+    """Parse `<DOMAIN>_distance_<target>_<r1>_<r2>_<r3>_<r4>_<r5>_<r6>`.
+
+    Receiver id MAY be a MAC slug (6 hex pairs joined by `_`) or a
+    friendly slug. Try MAC slug first (last 6 underscored chunks); if
+    they look like hex pairs, treat the rest as target. Otherwise fall
+    back to a single split on the last `_`.
+    """
+    if not unique_id.startswith(_UNIQUE_ID_PREFIX):
+        return None
+    rest = unique_id[len(_UNIQUE_ID_PREFIX):]
+    parts = rest.split("_")
+    if len(parts) >= 7:
+        tail = "_".join(parts[-6:])
+        if _MAC_SLUG_RE.match(tail):
+            head = "_".join(parts[:-6])
+            if head:
+                return head, tail
+    return None
+
+
+def _cleanup_legacy_mac_receivers(
+    hass: HomeAssistant, managed: dict
+) -> int:
+    """Remove legacy registry entries whose receiver id is a bare MAC slug
+    when the live discovery now resolves the same proxy to a friendly
+    slug. These are the `Distance to <mac>` rows that stay stuck as
+    "unavailable" forever after a rename.
+
+    Walks the entity registry directly so it catches entries even when
+    they have not been loaded into `hass.states`.
+    """
+    entity_registry = er.async_get(hass)
+
+    # Targets that currently own a friendly-receiver sensor.
+    friendly_targets: set[str] = set()
+    valid_unique_ids: set[str] = set()
+    for sensor in managed.values():
+        if not isinstance(sensor, BpsDistanceSensor):
+            continue
+        valid_unique_ids.add(sensor.unique_id or "")
+        rid = sensor._receiver_id
+        if rid and not _MAC_SLUG_RE.match(rid):
+            friendly_targets.add(sensor._target_id)
+
+    if not friendly_targets:
+        return 0
+
+    removed = 0
+    for entry in list(entity_registry.entities.values()):
+        if entry.platform != DOMAIN:
+            continue
+        uid = entry.unique_id or ""
+        if uid in valid_unique_ids:
+            continue
+        parsed = _split_unique_id(uid)
+        if parsed is None:
+            continue
+        target_id, receiver_id = parsed
+        if not _MAC_SLUG_RE.match(receiver_id):
+            continue
+        if target_id not in friendly_targets:
+            continue
+        entity_registry.async_remove(entry.entity_id)
+        removed += 1
+    return removed
 
 
 def _cleanup_corrupt_managed_entities(hass: HomeAssistant) -> int:
@@ -205,14 +274,22 @@ class BpsDistanceSensor(SensorEntity):
 
         scanner = get_scanner(self.hass)
         if scanner is None:
+            # Integration broken — the scanner subsystem is not running.
+            # Only here is "unavailable" the right state.
             self._attr_available = False
+            self._attr_native_value = None
             return
 
         from .__init__ import _resolve_target_identity
         identity = _resolve_target_identity(self.hass, self._target_id)
         source = scanner.resolve_receiver(self._receiver_id)
         if not identity or not source:
-            self._attr_available = False
+            # Configured target/receiver we can't resolve yet (proxy not
+            # connected, IRK alias not bound...). Stay "unknown" instead
+            # of "unavailable" so the entity remains in the dashboard
+            # and recovers cleanly when the link returns.
+            self._attr_available = True
+            self._attr_native_value = None
             return
 
         opts = _options(self.hass)
@@ -222,9 +299,8 @@ class BpsDistanceSensor(SensorEntity):
             stale_after = float(DEFAULT_STALE_AFTER)
         # Ask the scanner for the reading using the configured stale
         # window so a brief gap in advertisements does NOT immediately
-        # nuke the sensor to "unknown". The sticky behaviour below keeps
-        # the last value visible until `stale_after` seconds without any
-        # update; only then does the sensor go unavailable.
+        # nuke the sensor. Sticky behaviour below keeps the last value
+        # visible until `stale_after` seconds without any update.
         reading = scanner.get_distance(identity, source, max_age=stale_after)
         now = time.monotonic()
 
@@ -235,9 +311,9 @@ class BpsDistanceSensor(SensorEntity):
             self._cached_reading_ts = now
             return
 
-        # No fresh reading. Keep the previous value if it's still within
-        # the configured stale window — this is what the user wants:
-        # "que no pierda la medida anterior si no detecta anuncios".
+        # No fresh reading. Keep the previous value if still within the
+        # configured stale window — preserves a stable distance for live
+        # triangulation between sparse advertisements.
         if (
             self._cached_reading is not None
             and (now - self._cached_reading_ts) < stale_after
@@ -245,8 +321,12 @@ class BpsDistanceSensor(SensorEntity):
             self._attr_available = True
             return
 
+        # Beyond the stale window: surface as "unknown" (None value with
+        # available=True) instead of "unavailable" so the entity does not
+        # disappear from automations / dashboards and resumes as soon as
+        # the next advertisement lands.
         self._attr_native_value = None
-        self._attr_available = False
+        self._attr_available = True
 
 
 async def async_setup_entry(
@@ -342,12 +422,27 @@ async def async_setup_entry(
 
     _ensure_entities()
 
+    legacy_removed = _cleanup_legacy_mac_receivers(hass, managed)
+    if legacy_removed:
+        _LOGGER.warning(
+            "Removed %s legacy MAC-receiver BPS entities from registry",
+            legacy_removed,
+        )
+
     async def _async_refresh_entities() -> None:
         nonlocal refresh_task
         try:
             canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
             cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
             _ensure_entities()
+            # Re-run legacy cleanup once friendly proxies become known
+            # (initial setup races with proxies coming online).
+            removed_legacy = _cleanup_legacy_mac_receivers(hass, managed)
+            if removed_legacy:
+                _LOGGER.warning(
+                    "Removed %s legacy MAC-receiver BPS entities from registry",
+                    removed_legacy,
+                )
         except Exception as err:
             _LOGGER.exception("Error refreshing BPS discovery: %s", err)
         finally:

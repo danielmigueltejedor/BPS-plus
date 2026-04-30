@@ -10,5 +10,10 @@ CONF_STALE_AFTER = "stale_after"    # segundos antes de marcar la distancia como
 CONF_SCAN_INTERVAL = "scan_interval"  # cadencia con la que HA refresca cada sensor
 
 DEFAULT_UPDATE_INTERVAL = 2  # por ejemplo, 2 s
-DEFAULT_STALE_AFTER = 60     # mantener última distancia hasta 60 s sin advertisement
+# Mantener la última distancia hasta 180 s sin nuevo anuncio. Antes eran
+# 60 s, lo que provocaba que sensores de móviles con anuncios espaciados
+# (iPhone con la pantalla apagada, p.ej.) entrasen en "unknown" entre
+# medidas y rompiesen la triangulación en directo. 3 min equilibra
+# fluidez vs. detectar dispositivos que se han ido de verdad.
+DEFAULT_STALE_AFTER = 180
 DEFAULT_SCAN_INTERVAL = 2    # poll cada 2 s (default HA es 30 s, demasiado lento)

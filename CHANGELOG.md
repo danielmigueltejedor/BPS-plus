@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.8] - 2026-05-01
+- **`unknown` en lugar de `unavailable`.** Los `BpsDistanceSensor`
+  solo se marcan como `unavailable` cuando el subsistema BLE de BPS+
+  está caído. Si el target/receptor no resuelve aún (proxy
+  reconectando, alias IRK pendiente) o el `stale_after` se ha agotado,
+  el sensor queda en `unknown` (`available=True`, `state=None`). Así
+  no desaparece de automatizaciones ni dashboards y se recupera en
+  cuanto llega el siguiente anuncio.
+- **Sticky por defecto 180 s.** `DEFAULT_STALE_AFTER` pasa de 60 s a
+  180 s para que móviles con anuncios espaciados (iPhone con pantalla
+  apagada) no parpadeen entre ráfagas y la triangulación en directo
+  use distancias consistentes. Sigue siendo configurable.
+- **Limpieza de sensores MAC zombi.** Al arranque y tras cada refresh
+  de discovery se recorre el `entity_registry` y se eliminan las
+  entradas legacy cuyo `unique_id` apunta a un receptor con MAC slug
+  (`..._distance_to_aa_bb_cc_dd_ee_ff`) cuando ya existe un sensor
+  equivalente para el mismo target con el slug amigable del proxy
+  (`..._distance_to_bluetooth_proxy_cocina`). Esto barre los
+  `Distance to <mac>` que se quedaban anclados como `unavailable`
+  tras un renombrado del proxy.
+
 ## [1.7.7] - 2026-04-28
 - **Sticky distance values.** Each `BpsDistanceSensor` now keeps its
   last reading visible during gaps in the advertisement stream instead
