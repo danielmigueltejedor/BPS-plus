@@ -819,8 +819,11 @@ async def async_setup(hass: HomeAssistant, config):
     init_flag_key = f"{DOMAIN}_initialized"
 
     if hass.data.get(init_flag_key, False):
-        _LOGGER.warning("BPS+ has already been initialized. Aborting")
-        return True  # Abort if already running
+        # Benign: async_setup is also re-invoked from async_setup_entry
+        # so the heavy init runs once even on cold-boot. Use debug, not
+        # warning, so the log doesn't look like a crash to users.
+        _LOGGER.debug("BPS+ already initialised — skipping duplicate setup")
+        return True
 
     hass.data[init_flag_key] = True  # Set flag
 
@@ -908,16 +911,12 @@ async def async_setup(hass: HomeAssistant, config):
 
         _LOGGER.info("The BPS+ integration is fully initialized")
 
-    async def handle_homeassistant_started(event):
-        """Handles the 'homeassistant_started' event"""
-        await initialize_bps()
-
-    if hass.is_running:
-        await initialize_bps()
-    else:
-        hass.bus.async_listen_once(
-            "homeassistant_started", handle_homeassistant_started
-        )
+    # Run initialization immediately — views, file watcher and BLE
+    # scanner do not require HA to be in a fully-started state, and
+    # gating on `homeassistant_started` made the BPS+ panel fail to
+    # load maps when the user opened it during boot (the
+    # `/api/bps/maps` endpoint had not been registered yet).
+    await initialize_bps()
 
     return True
 
@@ -978,11 +977,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Registrar la vista para servir el script.js dinámico de BPS+
     hass.http.register_view(BpsPlusScriptView(hass, entry))
 
+    # Reutilizamos la inicialización general (APIs, watcher, scanner...).
+    # MUST run before forwarding to the sensor platform — otherwise
+    # sensor.py executes its discovery against an uninitialised BLE
+    # scanner and creates zero entities until the next refresh tick.
+    await async_setup(hass, {})
+
     # Configurar sensores (sensor.py)
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
-
-    # Reutilizamos la inicialización general (APIs, watcher, scanner...).
-    await async_setup(hass, {})
 
     # Sidebar panel must be re-registered on every entry setup, even
     # when async_setup short-circuits on the init flag (after a reload

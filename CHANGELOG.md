@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.9] - 2026-05-01
+- **Fix “No se pudieron cargar los mapas” al iniciar.** La inicialización
+  pesada (registro de vistas REST/WebSocket, watcher de `bpsdata.txt`,
+  arranque del escáner BLE nativo) ya no espera al evento
+  `homeassistant_started`: se ejecuta directamente en `async_setup`.
+  Antes el endpoint `/api/bps/maps` no estaba registrado todavía si el
+  usuario abría el panel BPS+ durante el arranque, lo que devolvía 404
+  y disparaba el `alert()` del frontend.
+- **Orden correcto de carga del entry.** `async_setup_entry` ahora
+  llama primero a `async_setup` (arranca el escáner BLE) y después
+  reenvía a la plataforma `sensor`. Antes el `sensor.py` corría con el
+  escáner sin inicializar y la primera ronda de discovery creaba cero
+  entidades, hasta que un cambio de estado externo disparaba un
+  refresh.
+- **Log limpio.** El warning `BPS+ has already been initialized.
+  Aborting` baja a `debug`. El doble `async_setup` (uno de HA, otro
+  desde `async_setup_entry`) es esperado y la flag ya lo cubre; no
+  es un fallo.
+
 ## [1.7.8] - 2026-05-01
 - **`unknown` en lugar de `unavailable`.** Los `BpsDistanceSensor`
   solo se marcan como `unavailable` cuando el subsistema BLE de BPS+
