@@ -2,6 +2,83 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.0] - 2026-05-01
+Versión grande: estabilidad, fugas de memoria y fixes de ciclo de vida.
+Engloba todos los cambios desde 1.7.7 más el trabajo nuevo.
+
+### Sensores
+- `unavailable` reservado solo a "subsistema BLE caído". Cuando el
+  target/receptor no resuelve aún o se agota `stale_after`, el sensor
+  pasa a `unknown` (`available=True`, `state=None`) en lugar de
+  desaparecer del dashboard.
+- Sticky por defecto subido a 180 s (`DEFAULT_STALE_AFTER`). Móviles
+  con anuncios espaciados (iPhone con pantalla apagada) ya no
+  parpadean entre ráfagas y la triangulación en directo usa
+  distancias consistentes.
+- Nuevo barrido en `entity_registry` que elimina las entradas legacy
+  con receptor en MAC slug (`..._distance_to_aa_bb_cc_..`) cuando ya
+  existe una contraparte con slug amigable
+  (`..._distance_to_bluetooth_proxy_cocina`). Adiós a los
+  `Distance to <mac>` zombi atascados como `unavailable`.
+
+### Ciclo de vida
+- `async_setup_entry` arranca primero `async_setup` (escáner BLE) y
+  después la plataforma `sensor`, evitando que la primera ronda de
+  discovery cree cero entidades por carrera.
+- `async_setup` ya no espera al evento `homeassistant_started`; las
+  vistas REST/WS se registran inmediatamente y el panel BPS+ carga
+  los mapas al primer intento durante el arranque.
+- `async_unload_entry` ahora cancela la tarea de posicionamiento,
+  para el watcher de `bpsdata.txt` y el escáner BLE, y libera los
+  listeners `homeassistant_stop` registrados previamente. Antes la
+  recarga del entry dejaba listeners y tareas zombis acumulándose.
+- `async_unload_entry` deja de borrar las entidades del registry; ese
+  comportamiento se traslada al nuevo `async_remove_entry` que solo
+  se ejecuta al desinstalar definitivamente la integración. Recargar
+  ya no destruye personalizaciones del usuario.
+- Listeners de `homeassistant_stop` y vistas dinámicas (`script.js`)
+  protegidos por flag para evitar registros duplicados al recargar.
+- `KeyError: 'bps_plus'` en boot frío resuelto con
+  `hass.data.setdefault(DOMAIN, {})` al inicio de `async_setup`.
+- Warning cosmético `BPS+ has already been initialized. Aborting`
+  bajado a `debug`.
+
+### Memoria
+- `_engine_state` (smoothers, Kalman, autocal por target) se purga
+  cada minuto: cualquier target que el escáner no haya visto en 30 min
+  se descarta.
+- `BleScanner.prune_stale()`: tira `devices`, `links` y aliases con
+  `last_seen` mayor a 30 min. Bound en memoria para entornos con
+  vecinos/AirTags rotando.
+
+### Posicionamiento
+- Trilateración: la elección de planta ahora prioriza la planta con
+  más receptores válidos y desempata por menor radio. Antes se
+  elegía solo por la baliza más cercana, lo que confundía al motor
+  cuando dos plantas compartían un par de proxies.
+- `PositionKalman` se re-siembra automáticamente si pasa más de 30 s
+  sin medidas — el prior de velocidad constante deja de ser válido y
+  arrastraba la posición filtrada hacia una extrapolación obsoleta.
+- Cap de distancia bajado de 80 m a 60 m (`DISTANCE_CAP_M`); en
+  interior cualquier estimación más larga es ruido / multipath.
+
+### Concurrencia
+- Lock asíncrono alrededor de `apitricords` para que las
+  actualizaciones paralelas de varias entidades no se pisen.
+- Escritura atómica de `bpsdata.txt`: se vuelca a `bpsdata.tmp` y se
+  hace `os.replace`. El watcher ya no observa estados intermedios y
+  desaparece el log "Error parsing JSON data" durante guardados.
+- `update_global_data` tolera lecturas durante guardado: lo registra
+  como `warning` y reintenta en el siguiente evento del watcher.
+
+### Configuración
+- `base_url` y `token` pasan a ser opcionales en el config flow. El
+  motor BLE nativo no los necesita; el frontend cae al token de la
+  sesión actual cuando se dejan vacíos.
+- `CONF_SCAN_INTERVAL` y `CONF_STALE_AFTER` se persisten también en
+  `entry.data` al crear la integración (antes solo aparecían en
+  options tras editar manualmente).
+
 ## [1.7.9] - 2026-05-01
 - **Fix “No se pudieron cargar los mapas” al iniciar.** La inicialización
   pesada (registro de vistas REST/WebSocket, watcher de `bpsdata.txt`,

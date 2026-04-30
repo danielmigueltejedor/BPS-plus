@@ -76,6 +76,13 @@ tracked_entities = []
 new_global_data = {}
 secToUpdate = 1
 apitricords = []
+_apitricords_lock = Lock()
+_BPS_DATA_KEY_TASKS = "tasks"
+_BPS_DATA_KEY_OBSERVER = "file_observer"
+_BPS_DATA_KEY_STOP_LISTENERS = "stop_listeners"
+
+# Drop link/engine state idle for longer than this many seconds.
+ENGINE_PRUNE_AFTER = 30 * 60.0  # 30 min
 
 
 def cache_discovery_data(
@@ -408,23 +415,40 @@ async def update_global_data(file_path):
     """Update global_data with the contents of the file"""
     global global_data
     new_data = await read_file(file_path)
+    if not new_data.strip():
+        global_data = []
+        return
     try:
-        global_data = json.loads(new_data) if new_data else []
-        _LOGGER.info("Updated global_data: %s", global_data)
+        global_data = json.loads(new_data)
+        _LOGGER.debug("Updated global_data from %s", file_path)
     except json.JSONDecodeError as e:
-        _LOGGER.error("Error parsing JSON data: %s", e)
+        # File watcher fires on partial writes too; tolerate transient
+        # corruption — the next write will trigger another read.
+        _LOGGER.warning(
+            "Ignoring malformed JSON in %s: %s (file may be mid-write)",
+            file_path, e,
+        )
 
 
 async def update_tracked_entities(hass, _unused=None):
     """Drive the positioning loop using the native BLE scanner."""
     global tracked_entities, new_global_data, secToUpdate
+    last_prune = time.monotonic()
     while True:
         try:
             scanner = get_scanner(hass)
             if scanner is None:
                 _LOGGER.warning("BLE scanner not initialised yet, retry in 5 s")
-                await asyncio.sleep(5)
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    raise
                 continue
+
+            now_mono = time.monotonic()
+            if now_mono - last_prune > 60.0:
+                _prune_engine_state(scanner, now_mono)
+                last_prune = now_mono
 
             # Discovery + alias setup MUST run every tick before checking
             # candidates. Otherwise rotating-MAC devices (Apple Watch,
@@ -463,14 +487,62 @@ async def update_tracked_entities(hass, _unused=None):
 
             await process_entities(hass, new_global_data)
 
+        except asyncio.CancelledError:
+            _LOGGER.debug("Positioning loop cancelled")
+            raise
         except Exception as e:
             _LOGGER.exception("Positioning loop iteration failed: %s", e)
 
-        await asyncio.sleep(secToUpdate)
+        try:
+            await asyncio.sleep(secToUpdate)
+        except asyncio.CancelledError:
+            raise
 
 
 # Per-entity engine state: smoothers, Kalman, stationarity, autocal.
 _engine_state: dict[str, dict] = {}
+
+
+def _prune_engine_state(scanner, now_mono: float) -> None:
+    """Drop per-target engine state for devices long idle and prune the
+    scanner's own device/link dicts in lock-step. Bounds memory when
+    private_ble_device aliases churn or transient devices fly through.
+    """
+    try:
+        dropped_dev = scanner.prune_stale(now_mono)
+        if dropped_dev:
+            _LOGGER.debug("Scanner dropped %d stale devices", dropped_dev)
+    except Exception as err:  # pragma: no cover - defensive
+        _LOGGER.debug("Scanner prune failed: %s", err)
+
+    if not _engine_state:
+        return
+    keep_targets: set[str] = set()
+    for meta in scanner.devices.values():
+        if now_mono - meta.last_seen < ENGINE_PRUNE_AFTER:
+            keep_targets.add(meta.identity)
+    stale = [
+        ent for ent in list(_engine_state)
+        if _resolve_target_identity_lazy(ent) not in keep_targets
+    ]
+    if not stale:
+        return
+    for ent in stale:
+        _engine_state.pop(ent, None)
+    _LOGGER.debug("Pruned %d stale engine entries", len(stale))
+
+
+def _resolve_target_identity_lazy(entity_token: str) -> str:
+    """Identity guess used by `_prune_engine_state` without a hass ref.
+
+    Mirrors `_resolve_target_identity` in the no-metadata case: MAC
+    slug -> canonical MAC, alias token unchanged.
+    """
+    if not entity_token:
+        return ""
+    if _MAC_TOKEN_RE.match(entity_token):
+        return scanner_normalize_mac(entity_token.replace("_", ":")) or entity_token
+    return entity_token
 
 
 def _get_engine_state(entity: str) -> dict:
@@ -591,12 +663,22 @@ def _build_floor_buckets(hass, eids, engine):
 
 
 def _select_active_floor(buckets: dict[str, dict]) -> str | None:
+    """Pick the floor most likely hosting the target.
+
+    Score = (sample count, -min_radius_px). More receivers seeing the
+    target trumps a single very-close one — useful when two floors
+    share a few proxies and one is genuinely populated.
+    """
     best_name = None
-    best_min_r = float("inf")
+    best_key: tuple[int, float] = (-1, float("inf"))
     for name, bucket in buckets.items():
-        min_r = min(s.radius_px for s in bucket["samples"])
-        if min_r < best_min_r:
-            best_min_r = min_r
+        samples = bucket["samples"]
+        if not samples:
+            continue
+        min_r = min(s.radius_px for s in samples)
+        key = (len(samples), -min_r)
+        if key > best_key:
+            best_key = key
             best_name = name
     return best_name
 
@@ -686,17 +768,18 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
     }
     engine["quality"] = quality
 
-    apitricords = update_or_add_entry(
-        apitricords,
-        {
-            "ent": entity,
-            "cords": [avg_x, avg_y],
-            "zone": zone,
-            "floor": floor_name,
-            "quality": quality,
-        },
-    )
-    await update_apitricords(hass, apitricords)
+    async with _apitricords_lock:
+        apitricords = update_or_add_entry(
+            apitricords,
+            {
+                "ent": entity,
+                "cords": [avg_x, avg_y],
+                "zone": zone,
+                "floor": floor_name,
+                "quality": quality,
+            },
+        )
+        await update_apitricords(hass, apitricords)
     hass.states.async_set(f"sensor.{entity}_bps_zone", zone)
     hass.states.async_set(f"sensor.{entity}_bps_floor", floor_name)
     hass.states.async_set(
@@ -815,6 +898,11 @@ async def async_setup(hass: HomeAssistant, config):
     """Set up the BPS+ integration."""
     _LOGGER.info("BPS+ integration initialized.")
 
+    # Make sure the per-domain bucket exists. HA can call `async_setup`
+    # before any config entry is processed (cold boot path), in which
+    # case nothing else has populated `hass.data[DOMAIN]` yet.
+    hass.data.setdefault(DOMAIN, {})
+
     # Usamos una flag con el DOMAIN para no inicializar dos veces
     init_flag_key = f"{DOMAIN}_initialized"
 
@@ -895,18 +983,36 @@ async def async_setup(hass: HomeAssistant, config):
         scanner = hass.data[DOMAIN].get("scanner")
         if scanner is None:
             scanner = BleScanner(hass)
-            scanner.start()
+            started = scanner.start()
+            if not started:
+                _LOGGER.error(
+                    "Native BLE scanner failed to start — distance "
+                    "estimation disabled. Make sure the bluetooth "
+                    "integration is loaded."
+                )
             hass.data[DOMAIN]["scanner"] = scanner
-            hass.bus.async_listen_once(
+
+        # Track lifecycle handles so async_unload_entry can clean up.
+        bucket = hass.data[DOMAIN].setdefault(_BPS_DATA_KEY_TASKS, [])
+        positioning_task = hass.async_create_task(update_tracked_entities(hass))
+        bucket.append(positioning_task)
+
+        if observer is not None:
+            hass.data[DOMAIN][_BPS_DATA_KEY_OBSERVER] = observer
+
+        # Register HA-stop hooks ONCE per process. Reloading the entry
+        # would otherwise stack listeners and accumulate dead callbacks.
+        stop_listeners = hass.data[DOMAIN].setdefault(
+            _BPS_DATA_KEY_STOP_LISTENERS, {}
+        )
+        if "scanner" not in stop_listeners:
+            stop_listeners["scanner"] = hass.bus.async_listen_once(
                 "homeassistant_stop", lambda _e: scanner.stop()
             )
-
-        hass.async_create_task(update_tracked_entities(hass))
-
-        # Parar watcher al detener HA
-        if observer is not None:
-            hass.bus.async_listen_once(
-                "homeassistant_stop", lambda event: observer.stop()
+        if observer is not None and "observer" not in stop_listeners:
+            stop_listeners["observer"] = hass.bus.async_listen_once(
+                "homeassistant_stop",
+                lambda _e: observer.stop(),
             )
 
         _LOGGER.info("The BPS+ integration is fully initialized")
@@ -922,48 +1028,81 @@ async def async_setup(hass: HomeAssistant, config):
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """Remove a configuration entry"""
-    _LOGGER.info("Attempting to offload platforms for entry: %s", entry.entry_id)
+    """Unload a configuration entry without destroying user data.
 
-    entity_registry = er.async_get(hass)
+    Reload semantics: HA calls this on every reload, so DO NOT remove
+    user-visible entities or saved files — just stop the workers and
+    detach the panel. Permanent removal lives in `async_remove_entry`.
+    """
+    _LOGGER.info("Unloading BPS+ entry: %s", entry.entry_id)
 
-    # Find and remove all entities that belong to this integration
-    entities_to_remove = [
-        entity.entity_id
-        for entity in entity_registry.entities.values()
-        if entity.platform == DOMAIN
-    ]
+    domain_data = hass.data.get(DOMAIN, {})
 
-    for entity_id in entities_to_remove:
-        _LOGGER.info(f"Removes sensor: {entity_id}")
-        entity_registry.async_remove(entity_id)
+    for task in list(domain_data.get(_BPS_DATA_KEY_TASKS, [])):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+    domain_data[_BPS_DATA_KEY_TASKS] = []
 
-    try:  # Attempt to unload platforms
+    observer = domain_data.pop(_BPS_DATA_KEY_OBSERVER, None)
+    if observer is not None:
+        try:
+            observer.stop()
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("File observer stop failed: %s", err)
+
+    scanner = domain_data.pop("scanner", None)
+    if scanner is not None:
+        try:
+            scanner.stop()
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("BLE scanner stop failed: %s", err)
+
+    for unsub in list(
+        domain_data.get(_BPS_DATA_KEY_STOP_LISTENERS, {}).values()
+    ):
+        try:
+            unsub()
+        except Exception:
+            pass
+    domain_data[_BPS_DATA_KEY_STOP_LISTENERS] = {}
+
+    # Allow async_setup to run heavy init again on the next setup_entry.
+    # NOTE: keep views_registered / websocket flags set — HA does not
+    # support unregistering HTTP views or WS commands cleanly, and a
+    # second registration would fail with a duplicate-name error.
+    hass.data.pop(f"{DOMAIN}_initialized", None)
+
+    try:
         unload_ok = await hass.config_entries.async_unload_platforms(
             entry, ["sensor"]
         )
     except Exception as e:
-        _LOGGER.error(
-            f"Error during offloading of platforms for entry {entry.entry_id}: {e}"
-        )
+        _LOGGER.error("Error unloading sensor platform: %s", e)
         return False
 
     if not unload_ok:
-        _LOGGER.error(
-            "Failed to offload platforms for entry: %s", entry.entry_id
-        )
         return False
 
-    try:  # Remove the frontend panel
+    try:
         async_remove_panel(hass, frontend_url_path="bps")
-        _LOGGER.info("Frontend-panel removed for entry: %s", entry.entry_id)
-    except Exception as e:
-        _LOGGER.error(
-            f"Error when removing frontend-panel for entry {entry.entry_id}: {e}"
-        )
-        return False
+    except Exception as err:
+        _LOGGER.debug("Panel removal during unload: %s", err)
 
+    _engine_state.clear()
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
+    """Permanent uninstall: drop registry entities owned by BPS+."""
+    _LOGGER.info("Removing BPS+ entry permanently: %s", entry.entry_id)
+    entity_registry = er.async_get(hass)
+    for entity in list(entity_registry.entities.values()):
+        if entity.platform == DOMAIN:
+            entity_registry.async_remove(entity.entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -974,8 +1113,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["config_entry"] = entry
 
-    # Registrar la vista para servir el script.js dinámico de BPS+
-    hass.http.register_view(BpsPlusScriptView(hass, entry))
+    # Registrar la vista para servir el script.js dinámico de BPS+ —
+    # HA rejects duplicate registrations across reloads, so guard with a
+    # flag like the other views.
+    script_view_flag = f"{DOMAIN}_script_view_registered"
+    if not hass.data.get(script_view_flag):
+        hass.http.register_view(BpsPlusScriptView(hass, entry))
+        hass.data[script_view_flag] = True
 
     # Reutilizamos la inicialización general (APIs, watcher, scanner...).
     # MUST run before forwarding to the sensor platform — otherwise
@@ -1036,46 +1180,47 @@ class BPSSaveAPIText(HomeAssistantView):
         maps_path = hass.config.path("www/bps_maps")
         bpsdata_file_path = Path(maps_path) / "bpsdata.txt"
 
+        # Atomic write — first dump to a sibling .tmp, then rename.
+        # The file watcher fires `on_modified`, which used to read a
+        # half-written file mid-flush and log a JSON parse error.
+        tmp_path = bpsdata_file_path.with_suffix(".tmp")
         try:  # Save coordinates to the bpsdata file
-            async with aiofiles.open(bpsdata_file_path, "w") as f:
+            async with aiofiles.open(tmp_path, "w") as f:
                 await f.write(coordinates)
-                _LOGGER.warning(f"New file: {data.get('new_floor')}")
-                if data.get("new_floor") == "true":  # If it is a new floor then save the file
-                    map_file = data.get("file")
-                    if not map_file:
-                        return web.Response(status=400, text="Missing file")
-                    map_file_path = Path(maps_path) / map_file.filename
+            os.replace(tmp_path, bpsdata_file_path)
+            _LOGGER.debug("Saved bpsdata.txt (new_floor=%s)", data.get("new_floor"))
+
+            if data.get("new_floor") == "true":  # If it is a new floor then save the file
+                map_file = data.get("file")
+                if not map_file:
+                    return web.Response(status=400, text="Missing file")
+                map_file_path = Path(maps_path) / map_file.filename
+                try:
+                    async with aiofiles.open(map_file_path, "wb") as f:
+                        await f.write(map_file.file.read())
+                except Exception as e:
+                    _LOGGER.error(f"Failed to save maps: {e}")
+                    return web.Response(
+                        status=500, text="Failed to save maps"
+                    )
+
+            # Check if "remove" key exists and delete the specified file
+            remove_file = data.get("remove")
+            if remove_file:
+                remove_file_path = Path(maps_path) / remove_file
+                if remove_file_path.exists():
                     try:
-                        async with aiofiles.open(map_file_path, "wb") as f:
-                            await f.write(map_file.file.read())
+                        remove_file_path.unlink()
+                        _LOGGER.info("Removed file: %s", remove_file_path)
                     except Exception as e:
-                        _LOGGER.error(f"Failed to save maps: {e}")
+                        _LOGGER.error(
+                            f"Failed to remove file {remove_file_path}: {e}"
+                        )
                         return web.Response(
-                            status=500, text="Failed to save maps"
+                            status=500, text="Failed to remove file"
                         )
 
-                # Check if "remove" key exists and delete the specified file
-                remove_file = data.get("remove")
-                if remove_file:
-                    remove_file_path = Path(maps_path) / remove_file
-                    if remove_file_path.exists():
-                        _LOGGER.warning(
-                            f"File exist: {remove_file_path}"
-                        )
-                        try:
-                            remove_file_path.unlink()  # Delete the file
-                            _LOGGER.info(
-                                f"Removed file: {remove_file_path}"
-                            )
-                        except Exception as e:
-                            _LOGGER.error(
-                                f"Failed to remove file {remove_file_path}: {e}"
-                            )
-                            return web.Response(
-                                status=500, text="Failed to remove file"
-                            )
-
-            _LOGGER.info(f"Saved coordinates to bpsdata: {coordinates}")
+            _LOGGER.debug("Saved coordinates payload (%d bytes)", len(coordinates))
             return web.Response(
                 status=200, text="Coordinates saved successfully"
             )

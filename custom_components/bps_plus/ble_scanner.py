@@ -38,9 +38,13 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_TX_POWER = -59.0   # typical iBeacon RSSI at 1 m
 DEFAULT_PATH_LOSS = 2.5    # indoor mixed environment
 STALE_AFTER = 90.0         # seconds after which a link is considered dead
-DISTANCE_CAP_M = 80.0      # readings above this are multipath garbage; drop
+DISTANCE_CAP_M = 60.0      # indoor multipath rarely makes >60 m credible
 MIN_FIT_SAMPLES = 5
 MAX_FIT_SAMPLES = 60
+# Drop devices and links unseen for this many seconds. Bounds memory
+# growth when transient devices fly through the BLE field (neighbours,
+# delivery riders, AirTags from passers-by, ...).
+DEVICE_PRUNE_AFTER = 60 * 30.0   # 30 min
 
 
 def normalize_mac(value) -> str | None:
@@ -167,6 +171,31 @@ class BleScanner:
             except Exception:
                 pass
             self._unsub = None
+
+    def prune_stale(self, now: float | None = None) -> int:
+        """Drop devices and links unseen for `DEVICE_PRUNE_AFTER` seconds.
+
+        Returns count of dropped device entries. Calibration samples
+        belonging to live links are kept across rotations via
+        `set_alias`, so pruning is safe.
+        """
+        cutoff = (now if now is not None else time.monotonic()) - DEVICE_PRUNE_AFTER
+        dead_devices = [
+            ident for ident, meta in self.devices.items()
+            if meta.last_seen < cutoff
+        ]
+        if not dead_devices:
+            return 0
+        dead_set = set(dead_devices)
+        for ident in dead_devices:
+            self.devices.pop(ident, None)
+        # Drop any link whose target is gone.
+        for key in [k for k in list(self.links) if k[0] in dead_set]:
+            self.links.pop(key, None)
+        # Drop alias entries whose target identity is gone.
+        for mac in [m for m, ident in list(self._aliases.items()) if ident in dead_set]:
+            self._aliases.pop(mac, None)
+        return len(dead_devices)
 
     # -- Advertisement handling --------------------------------------------
 

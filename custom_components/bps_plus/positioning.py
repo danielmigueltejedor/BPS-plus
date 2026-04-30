@@ -336,6 +336,12 @@ class PositionKalman:
             return self.x[:2].copy()
 
         dt = max(1e-3, float(t) - self._last_t)
+        # Re-seed when the target reappears after a long absence — the
+        # constant-velocity prior is no longer valid and would drag the
+        # smoothed position towards a stale extrapolation.
+        if dt > 30.0:
+            self.reset(xy, t)
+            return self.x[:2].copy()
         self._last_t = float(t)
 
         F = np.array(

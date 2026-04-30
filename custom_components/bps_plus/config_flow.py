@@ -31,15 +31,12 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            base_url = user_input[CONF_BASE_URL].strip()
-            token = user_input[CONF_TOKEN].strip()
+            base_url = (user_input.get(CONF_BASE_URL) or "").strip()
+            token = (user_input.get(CONF_TOKEN) or "").strip()
             interval = user_input.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
 
-            if not base_url.startswith(("http://", "https://")):
+            if base_url and not base_url.startswith(("http://", "https://")):
                 errors[CONF_BASE_URL] = "invalid_url"
-
-            if not token:
-                errors[CONF_TOKEN] = "required"
 
             if interval < 1 or interval > 60:
                 errors[CONF_UPDATE_INTERVAL] = "range"
@@ -54,13 +51,22 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_BASE_URL: base_url,
                         CONF_TOKEN: token,
                         CONF_UPDATE_INTERVAL: interval,
+                        CONF_SCAN_INTERVAL: user_input.get(
+                            CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                        ),
+                        CONF_STALE_AFTER: user_input.get(
+                            CONF_STALE_AFTER, DEFAULT_STALE_AFTER
+                        ),
                     },
                 )
 
+        # base_url and token are optional now: the native BLE scanner
+        # does not need an external HA URL/token, and the frontend
+        # falls back to the page's own session when blank.
         schema = vol.Schema(
             {
-                vol.Required(CONF_BASE_URL): str,
-                vol.Required(CONF_TOKEN): str,
+                vol.Optional(CONF_BASE_URL, default=""): str,
+                vol.Optional(CONF_TOKEN, default=""): str,
                 vol.Optional(CONF_UPDATE_INTERVAL, default=DEFAULT_UPDATE_INTERVAL): vol.Coerce(int),
                 vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.Coerce(int),
                 vol.Optional(CONF_STALE_AFTER, default=DEFAULT_STALE_AFTER): vol.Coerce(int),
@@ -90,8 +96,8 @@ class BpsPlusOptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_BASE_URL, default=options.get(CONF_BASE_URL, data.get(CONF_BASE_URL))): str,
-                vol.Required(CONF_TOKEN, default=options.get(CONF_TOKEN, data.get(CONF_TOKEN))): str,
+                vol.Optional(CONF_BASE_URL, default=options.get(CONF_BASE_URL, data.get(CONF_BASE_URL, ""))): str,
+                vol.Optional(CONF_TOKEN, default=options.get(CONF_TOKEN, data.get(CONF_TOKEN, ""))): str,
                 vol.Optional(
                     CONF_UPDATE_INTERVAL,
                     default=options.get(CONF_UPDATE_INTERVAL, data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)),
