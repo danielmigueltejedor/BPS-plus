@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.1] - 2026-05-01
+### Seguridad
+- Todas las vistas HTTP del componente (`/bps/*`, `/api/bps/*`,
+  `script.js` dinámico) exigen sesión de Home Assistant
+  (`requires_auth = True`).
+- El endpoint `/api/bps/frontend_config` ya no devuelve el token de larga
+  duración; el panel intenta usar el token de sesión del navegador para
+  WebSocket en tiempo real.
+- `script_template.js` deja de inyectar Bearer token y usa
+  `credentials: "include"` contra la API de HA.
+
+### Mapas y datos
+- Guardado de imágenes de planta: nombre de fichero saneado y solo
+  extensiones permitidas (`.png`, `.jpg`, `.jpeg`); borrado por `remove`
+  rechaza rutas con componentes de directorio (anti path traversal).
+
+### Desarrollo / CI
+- `pyproject.toml` con configuración de `pytest` y `ruff`.
+- Tests unitarios iniciales (`tests/`) para utilidades de
+  `ble_scanner` y `positioning`.
+- Workflow GitHub Actions (`.github/workflows/ci.yml`): `ruff` sobre
+  `tests` y `pytest`.
+
 ## [1.8.0] - 2026-05-01
 Versión grande: estabilidad, fugas de memoria y fixes de ciclo de vida.
 Engloba todos los cambios desde 1.7.7 más el trabajo nuevo.

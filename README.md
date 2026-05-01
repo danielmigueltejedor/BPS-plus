@@ -1,6 +1,6 @@
 # 📍 BLE Positioning System Plus (BPS+) for Home Assistant
 
-![Version](https://img.shields.io/badge/version-1.7.7-blue.svg)
+![Version](https://img.shields.io/badge/version-1.8.1-blue.svg)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=home-assistant)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-experimental-orange.svg)
@@ -207,7 +207,7 @@ action:
 - **[@danielmigueltejedor](https://github.com/danielmigueltejedor)**  
 - Repositorio: https://github.com/danielmigueltejedor/BPS-plus  
 - Licencia: MIT  
-- Versión: 1.7.7
+- Versión: 1.8.1
 
 ---
 
