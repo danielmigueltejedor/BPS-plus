@@ -1,9 +1,5 @@
-//Create a long-lived token
-//Click on you user in the bottom left corner
-//Click on security on the top of the page
-//In the bottom of the page, create a new token. The name does not matter
-//Copy the token and below
-//Example: let hass_token = "my_secret_token";
+// Optional override for external websocket auth token.
+// Prefer automatic session token discovery from Home Assistant.
 let hass_token = "";
 // Add your url that you use in your browser
 //Example1: const hassURL = "xxx.duckdns.org";
@@ -159,9 +155,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                 }
                 const cfg = await response.json();
-                if (cfg && typeof cfg.token === "string" && cfg.token.trim()) {
-                    hass_token = cfg.token.trim();
-                }
                 if (cfg && typeof cfg.base_url === "string" && cfg.base_url.trim()) {
                     hassURL = cfg.base_url.trim();
                     hassWSURL = normalizeWebSocketUrl(hassURL);
@@ -169,6 +162,31 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (_err) {
                 // Keep manual fallback values when endpoint is unavailable.
             }
+        }
+
+        function maybeLoadTokenFromStorage() {
+            if (hass_token) {
+                return hass_token;
+            }
+            try {
+                const keys = ["hassTokens", "hassTokensEncrypted"];
+                for (const key of keys) {
+                    const raw = window.localStorage.getItem(key);
+                    if (!raw) continue;
+                    const parsed = JSON.parse(raw);
+                    const token =
+                        parsed?.access_token ||
+                        parsed?.token?.access_token ||
+                        parsed?.data?.access_token;
+                    if (typeof token === "string" && token.trim()) {
+                        hass_token = token.trim();
+                        return hass_token;
+                    }
+                }
+            } catch (_e) {
+                // Ignore; user can still provide token manually.
+            }
+            return "";
         }
 
         async function getSavedMaps(){
@@ -244,13 +262,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
+            maybeLoadTokenFromStorage();
             if (!hass_token || !hassWSURL){
                 let messageStr = "";
                 if (!hass_token){
-                    messageStr = "Debes añadir un token de larga duración en la configuración de la integración";
+                    messageStr = "No se pudo obtener token de sesión para WebSocket. Usa el modo sin tiempo real o configura un token manual en el script.";
                 }
                 if (!hass_token && !hassWSURL){
-                    messageStr = messageStr+" y la URL de HA. Revisa la configuración de BPS-Plus.";
+                    messageStr = messageStr+" También falta la URL de HA. Revisa la configuración de BPS-Plus.";
                     alert(messageStr);
                     return;
                 }

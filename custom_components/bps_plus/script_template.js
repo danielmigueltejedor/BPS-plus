@@ -1,16 +1,13 @@
 // BPS-Plus generated script
 
 const BASE_URL = "__BASE_URL__";
-const TOKEN = "__TOKEN__";
 const UPDATE_INTERVAL = __UPDATE_INTERVAL__; // ms
 
 async function getBpsPlusData() {
   try {
     const r = await fetch(`${BASE_URL}/api/states`, {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json",
-      },
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
     });
 
     if (!r.ok) {

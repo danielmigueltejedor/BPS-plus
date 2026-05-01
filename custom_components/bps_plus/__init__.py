@@ -1143,8 +1143,7 @@ class BPSFrontendView(HomeAssistantView):
 
     url = "/bps/{file_name}"
     name = "bps:frontend"
-    requires_auth = False
-    # requires_auth = True
+    requires_auth = True
 
     async def get(self, request, file_name):
         """Serve static files from the frontend folder."""
@@ -1164,7 +1163,7 @@ class BPSSaveAPIText(HomeAssistantView):
 
     url = "/api/bps/save_text"
     name = "api:bps:save_text"
-    requires_auth = False
+    requires_auth = True
 
     async def post(self, request):
         """Handle saving coordinates to a text file."""
@@ -1194,7 +1193,11 @@ class BPSSaveAPIText(HomeAssistantView):
                 map_file = data.get("file")
                 if not map_file:
                     return web.Response(status=400, text="Missing file")
-                map_file_path = Path(maps_path) / map_file.filename
+                raw_name = Path(str(map_file.filename or "")).name
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name)
+                if not safe_name or not safe_name.lower().endswith((".png", ".jpg", ".jpeg")):
+                    return web.Response(status=400, text="Invalid map filename")
+                map_file_path = Path(maps_path) / safe_name
                 try:
                     async with aiofiles.open(map_file_path, "wb") as f:
                         await f.write(map_file.file.read())
@@ -1207,7 +1210,10 @@ class BPSSaveAPIText(HomeAssistantView):
             # Check if "remove" key exists and delete the specified file
             remove_file = data.get("remove")
             if remove_file:
-                remove_file_path = Path(maps_path) / remove_file
+                safe_remove_name = Path(str(remove_file)).name
+                if safe_remove_name != str(remove_file):
+                    return web.Response(status=400, text="Invalid remove path")
+                remove_file_path = Path(maps_path) / safe_remove_name
                 if remove_file_path.exists():
                     try:
                         remove_file_path.unlink()
@@ -1237,7 +1243,7 @@ class BPSReadAPIText(HomeAssistantView):
 
     url = "/api/bps/read_text"
     name = "api:bps:read_text"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
         """Handle reading coordinates from the text file."""
@@ -1281,7 +1287,7 @@ class BPSMapsListAPI(HomeAssistantView):
 
     url = "/api/bps/maps"
     name = "api:bps:maps"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
         """Return a list of map files as JSON."""
@@ -1313,31 +1319,28 @@ class BPSFrontendConfigAPI(HomeAssistantView):
 
     url = "/api/bps/frontend_config"
     name = "api:bps:frontend_config"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
-        """Return base_url/token/update_interval for the panel frontend."""
+        """Return non-sensitive frontend runtime config."""
         hass = request.app["hass"]
         entry = hass.data.get(DOMAIN, {}).get("config_entry")
         if entry is None:
             return web.json_response(
                 {
                     "base_url": "",
-                    "token": "",
                     "update_interval": DEFAULT_UPDATE_INTERVAL,
                 }
             )
 
         data = {**entry.data, **entry.options}
         base_url = str(data.get(CONF_BASE_URL, "")).strip()
-        token = str(data.get(CONF_TOKEN, "")).strip()
         update_interval = int(
             data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
         )
         return web.json_response(
             {
                 "base_url": base_url,
-                "token": token,
                 "update_interval": update_interval,
             }
         )
@@ -1348,7 +1351,7 @@ class BPSDistanceValueAPI(HomeAssistantView):
 
     url = "/api/bps/distance"
     name = "api:bps:distance"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
         """Return numeric value of a distance entity."""
@@ -1416,7 +1419,7 @@ class BPSScannersAPI(HomeAssistantView):
 
     url = "/api/bps/scanners"
     name = "api:bps:scanners"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
         hass = request.app["hass"]
@@ -1444,7 +1447,7 @@ class BPSBleSnapshotAPI(HomeAssistantView):
 
     url = "/api/bps/ble_snapshot"
     name = "api:bps:ble_snapshot"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
         hass = request.app["hass"]
@@ -1461,7 +1464,7 @@ class BPSDiagnosticsAPI(HomeAssistantView):
 
     url = "/api/bps/diagnostics"
     name = "api:bps:diagnostics"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):
         target = request.query.get("entity")
@@ -1488,7 +1491,7 @@ class BPSCordsAPI(HomeAssistantView):
 
     url = "/api/bps/cords"
     name = "api:bps:cords"
-    requires_auth = False  # Ändra till True om du vill kräva autentisering
+    requires_auth = True
 
     def __init__(self, hass: HomeAssistant):
         """Spara referens till hass"""
@@ -1513,7 +1516,7 @@ class BpsPlusScriptView(HomeAssistantView):
 
     url = "/bps-plus/script.js"
     name = "bps_plus:script"
-    requires_auth = False  # Igual que cuando metías el token en el JS a mano
+    requires_auth = True
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Inicializa la vista con acceso a hass y al entry."""
@@ -1521,7 +1524,7 @@ class BpsPlusScriptView(HomeAssistantView):
         self.entry = entry
 
     async def get(self, request: web.Request) -> web.Response:
-        """Devuelve el script con URL, token e intervalo inyectados."""
+        """Devuelve el script con URL e intervalo inyectados."""
 
         # Mezclamos data y options (options tiene prioridad)
         data = {
@@ -1530,7 +1533,6 @@ class BpsPlusScriptView(HomeAssistantView):
         }
 
         base_url: str = data.get(CONF_BASE_URL, "").strip()
-        token: str = data.get(CONF_TOKEN, "").strip()
         update_interval: int = int(
             data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
         )
@@ -1555,7 +1557,7 @@ class BpsPlusScriptView(HomeAssistantView):
         # Reemplazar marcadores por valores de la config
         content = (
             content.replace("__BASE_URL__", base_url)
-            .replace("__TOKEN__", token)
+            .replace("__TOKEN__", "")
             .replace("__UPDATE_INTERVAL__", str(update_interval * 1000))
         )
 
