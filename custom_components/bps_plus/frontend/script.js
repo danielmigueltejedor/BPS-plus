@@ -7,6 +7,60 @@ let hass_token = "";
 let hassURL = "";
 let hassWSURL = "";
 
+// Pull HA session token from same-origin localStorage. The iframe
+// panel runs on HA's own host, so `hassTokens` is shared with the
+// parent frontend. Without this, every /api/bps/* call returns 401
+// because HA's HTTP layer requires `Authorization: Bearer <token>`.
+function _bpsLoadTokenFromStorage() {
+    if (hass_token) return hass_token;
+    try {
+        for (const key of ["hassTokens", "hassTokensEncrypted"]) {
+            const raw = window.localStorage.getItem(key);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            const token =
+                parsed?.access_token ||
+                parsed?.token?.access_token ||
+                parsed?.data?.access_token;
+            if (typeof token === "string" && token.trim()) {
+                hass_token = token.trim();
+                return hass_token;
+            }
+        }
+    } catch (_e) {
+        // localStorage unreadable — falls back to plain fetch.
+    }
+    return "";
+}
+
+// Inject Authorization header on every same-origin /api/* request.
+// Done here instead of editing each call site so future fetch()s in
+// this file (or added later) get auth automatically.
+(function _bpsInstallAuthFetch() {
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        const url =
+            typeof input === "string"
+                ? input
+                : input && input.url
+                    ? input.url
+                    : "";
+        const isApi =
+            url.startsWith("/api/") ||
+            url.startsWith(window.location.origin + "/api/");
+        if (!isApi) return _origFetch(input, init);
+        const token = _bpsLoadTokenFromStorage();
+        if (!token) return _origFetch(input, init);
+        const next = init ? { ...init } : {};
+        const existing = new Headers(next.headers || {});
+        if (!existing.has("Authorization")) {
+            existing.set("Authorization", `Bearer ${token}`);
+        }
+        next.headers = existing;
+        return _origFetch(input, next);
+    };
+})();
+
 document.addEventListener('DOMContentLoaded', async () => {
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');

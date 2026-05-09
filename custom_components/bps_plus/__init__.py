@@ -1122,20 +1122,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 
 class BPSFrontendView(HomeAssistantView):
-    """Serve the frontend files."""
+    """Serve the frontend files.
+
+    `requires_auth = False` — HA's panel iframe loader navigates the
+    iframe to `/bps/index.html` directly, so the browser cannot attach
+    an Authorization header. With auth on, the iframe always 401s.
+    The files are static HTML/CSS/JS/SVG with no secrets; the secrets
+    live behind `/api/bps/*`, which still requires auth and is called
+    from inside the iframe via Bearer tokens read from localStorage.
+    """
 
     url = "/bps/{file_name}"
     name = "bps:frontend"
-    requires_auth = True
+    requires_auth = False
 
     async def get(self, request, file_name):
         """Serve static files from the frontend folder."""
-        frontend_path = FRONTEND_PATH / file_name
-
-        _LOGGER.info(f"Serving file: {frontend_path}")
+        # Anti path-traversal: resolved path must stay inside FRONTEND_PATH.
+        try:
+            frontend_path = (FRONTEND_PATH / file_name).resolve()
+            base = FRONTEND_PATH.resolve()
+            frontend_path.relative_to(base)
+        except (ValueError, OSError):
+            return web.Response(status=400, text="Invalid path")
 
         if not frontend_path.is_file():
-            _LOGGER.error(f"Requested file not found: {frontend_path}")
             return web.Response(status=404, text="File not found")
 
         return web.FileResponse(path=str(frontend_path))

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.3] - 2026-05-09
+### Auth (fix 401 panel)
+- `BPSFrontendView` (`/bps/*`) vuelve a `requires_auth = False`. El
+  iframe del panel HA no puede mandar `Authorization` en la
+  navegación inicial, así que con auth activa el panel cargaba 401.
+  Los ficheros estáticos no llevan secretos; se añade comprobación
+  anti path-traversal sobre el path resuelto.
+- El frontend del panel inyecta automáticamente
+  `Authorization: Bearer <token>` (leído de `localStorage.hassTokens`)
+  en toda llamada a `/api/*`. Sin esto, cada `/api/bps/*` daba 401
+  desde el panel.
+
 ## [1.8.2] - 2026-05-09
 ### Arranque
 - `async_setup` deja de bloquear el arranque de Home Assistant. Las

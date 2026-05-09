@@ -11,7 +11,8 @@
       "Bash(cp /Users/danielmigueltejedor/VSCode/BPS-plus/custom_components/bps_plus/positioning.py /tmp/positioning.py)",
       "Bash(python3 -c ' *)",
       "Bash(python3 -m py_compile custom_components/bps_plus/__init__.py custom_components/bps_plus/config_flow.py custom_components/bps_plus/const.py)",
-      "Bash(python3 -m pytest tests/ -x --tb=short)"
+      "Bash(python3 -m pytest tests/ -x --tb=short)",
+      "Bash(python3 -m py_compile custom_components/bps_plus/__init__.py)"
     ]
   }
 }
