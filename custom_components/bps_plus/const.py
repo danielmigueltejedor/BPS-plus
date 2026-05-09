@@ -4,7 +4,6 @@ DOMAIN = "bps_plus"
 
 # Configuración expuesta en el config flow / options
 CONF_BASE_URL = "base_url"          # URL externa (Nabu Casa / Nginx / etc.)
-CONF_TOKEN = "token"                # Long-lived access token de HA
 CONF_UPDATE_INTERVAL = "update_interval"  # Intervalo de actualización en segundos
 CONF_STALE_AFTER = "stale_after"    # segundos antes de marcar la distancia como no disponible
 CONF_SCAN_INTERVAL = "scan_interval"  # cadencia con la que HA refresca cada sensor

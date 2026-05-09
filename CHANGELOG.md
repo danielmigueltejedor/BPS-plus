@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.2] - 2026-05-09
+### Arranque
+- `async_setup` deja de bloquear el arranque de Home Assistant. Las
+  vistas HTTP y comandos WebSocket se registran al instante; el BLE
+  scanner, el watcher de fichero y el bucle de posicionamiento ahora
+  arrancan en una `background_task`. HA ya no se queda atascado en
+  "Home Assistant se está iniciando" mientras BPS+ inicializa.
+
+### Auth / panel
+- Eliminado el endpoint `/bps-plus/script.js` (`BpsPlusScriptView`) y
+  `script_template.js`. BPS+ vive solo dentro del panel de HA, donde
+  la autenticación va por la cookie de sesión — ya no hace falta token.
+- `CONF_TOKEN` retirado del config flow, opciones y `const.py`.
+
 ## [1.8.1] - 2026-05-01
 ### Seguridad
 - Todas las vistas HTTP del componente (`/bps/*`, `/api/bps/*`,

@@ -57,7 +57,6 @@ from homeassistant.config_entries import ConfigEntry
 from .const import (
     DOMAIN,
     CONF_BASE_URL,
-    CONF_TOKEN,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
 )
@@ -894,135 +893,127 @@ def _ensure_panel(hass: HomeAssistant) -> None:
         _LOGGER.error("Failed to register BPS+ panel: %s", err)
 
 
+def _register_http_and_ws(hass: HomeAssistant) -> None:
+    """Register REST views and WS commands. Cheap, synchronous.
+
+    Done inline during async_setup so HA's HTTP layer answers
+    `/api/bps/*` and `/bps/*` immediately — even before the BLE scanner
+    finishes booting. Avoids the panel-fails-to-load-maps regression we
+    had when init was gated on `homeassistant_started`.
+    """
+    views_flag_key = f"{DOMAIN}_views_registered"
+    if views_flag_key not in hass.data:
+        hass.http.register_view(BPSFrontendView())
+        hass.http.register_view(BPSSaveAPIText())
+        hass.http.register_view(BPSMapsListAPI())
+        hass.http.register_view(BPSReadAPIText())
+        hass.http.register_view(BPSFrontendConfigAPI())
+        hass.http.register_view(BPSDistanceValueAPI())
+        hass.http.register_view(BPSScannersAPI())
+        hass.http.register_view(BPSBleSnapshotAPI())
+        hass.http.register_view(BPSDiagnosticsAPI())
+        hass.http.register_view(BPSCordsAPI(hass))
+        hass.data[views_flag_key] = True
+
+    ws_flag_key = f"{DOMAIN}_websocket"
+    if ws_flag_key not in hass.data:
+        websocket = BPSEntityWebSocket(hass)
+        websocket.register()
+        hass.data[ws_flag_key] = websocket
+
+
+async def _async_finish_init(hass: HomeAssistant) -> None:
+    """Heavy init: file IO, BLE scanner, watcher, positioning loop.
+
+    Runs as a background task so HA boot doesn't block on it. The user
+    used to see "Home Assistant is starting" stuck for a long time
+    because async_setup_entry awaited all of this.
+    """
+    config_path = hass.config.path()
+    target_dir = os.path.join(config_path, "www", "bps_maps")
+    target_file = os.path.join(target_dir, "bpsdata.txt")
+
+    try:
+        await aiofiles.os.makedirs(target_dir, exist_ok=True)
+    except Exception as e:
+        _LOGGER.error("Could not create the folder %s: %s", target_dir, e)
+        return
+
+    try:
+        if not os.path.exists(target_file):
+            async with aiofiles.open(target_file, mode="w") as file:
+                await file.write("")
+            _LOGGER.info("Created %s", target_file)
+    except Exception as e:
+        _LOGGER.error("Could not create file %s: %s", target_file, e)
+
+    await update_global_data(target_file)
+
+    observer = setup_file_watcher(
+        target_file, lambda: update_global_data(target_file), hass
+    )
+
+    scanner = hass.data[DOMAIN].get("scanner")
+    if scanner is None:
+        scanner = BleScanner(hass)
+        started = scanner.start()
+        if not started:
+            _LOGGER.error(
+                "Native BLE scanner failed to start — distance "
+                "estimation disabled. Make sure the bluetooth "
+                "integration is loaded."
+            )
+        hass.data[DOMAIN]["scanner"] = scanner
+
+    bucket = hass.data[DOMAIN].setdefault(_BPS_DATA_KEY_TASKS, [])
+    positioning_task = hass.async_create_background_task(
+        update_tracked_entities(hass), "bps_plus_positioning"
+    )
+    bucket.append(positioning_task)
+
+    if observer is not None:
+        hass.data[DOMAIN][_BPS_DATA_KEY_OBSERVER] = observer
+
+    stop_listeners = hass.data[DOMAIN].setdefault(
+        _BPS_DATA_KEY_STOP_LISTENERS, {}
+    )
+    if "scanner" not in stop_listeners:
+        stop_listeners["scanner"] = hass.bus.async_listen_once(
+            "homeassistant_stop", lambda _e: scanner.stop()
+        )
+    if observer is not None and "observer" not in stop_listeners:
+        stop_listeners["observer"] = hass.bus.async_listen_once(
+            "homeassistant_stop",
+            lambda _e: observer.stop(),
+        )
+
+    _LOGGER.info("BPS+ background init complete")
+
+
 async def async_setup(hass: HomeAssistant, config):
-    """Set up the BPS+ integration."""
+    """Set up the BPS+ integration. Non-blocking.
+
+    Cheap registrations happen inline; heavy init (file IO + BLE
+    scanner + positioning loop) is scheduled as a background task so
+    HA's startup is not gated on it.
+    """
     _LOGGER.info("BPS+ integration initialized.")
 
-    # Make sure the per-domain bucket exists. HA can call `async_setup`
-    # before any config entry is processed (cold boot path), in which
-    # case nothing else has populated `hass.data[DOMAIN]` yet.
     hass.data.setdefault(DOMAIN, {})
 
-    # Usamos una flag con el DOMAIN para no inicializar dos veces
     init_flag_key = f"{DOMAIN}_initialized"
-
     if hass.data.get(init_flag_key, False):
-        # Benign: async_setup is also re-invoked from async_setup_entry
-        # so the heavy init runs once even on cold-boot. Use debug, not
-        # warning, so the log doesn't look like a crash to users.
         _LOGGER.debug("BPS+ already initialised — skipping duplicate setup")
         return True
+    hass.data[init_flag_key] = True
 
-    hass.data[init_flag_key] = True  # Set flag
+    _register_http_and_ws(hass)
 
-    async def initialize_bps():
-        """Initialize the BPS+ component"""
-        _LOGGER.info("Initializing BPS+...")
-
-        # Registrar vistas REST solo una vez
-        views_flag_key = f"{DOMAIN}_views_registered"
-        if views_flag_key not in hass.data:
-            hass.http.register_view(BPSFrontendView())
-            hass.http.register_view(BPSSaveAPIText())
-            hass.http.register_view(BPSMapsListAPI())
-            hass.http.register_view(BPSReadAPIText())
-            hass.http.register_view(BPSFrontendConfigAPI())
-            hass.http.register_view(BPSDistanceValueAPI())
-            hass.http.register_view(BPSScannersAPI())
-            hass.http.register_view(BPSBleSnapshotAPI())
-            hass.http.register_view(BPSDiagnosticsAPI())
-            hass.http.register_view(BPSCordsAPI(hass))
-            hass.data[views_flag_key] = True
-
-        # Registrar WebSocket solo una vez
-        ws_flag_key = f"{DOMAIN}_websocket"
-        if ws_flag_key not in hass.data:
-            websocket = BPSEntityWebSocket(hass)
-            websocket.register()
-            hass.data[ws_flag_key] = websocket
-
-        config_path = hass.config.path()
-        target_dir = os.path.join(config_path, "www", "bps_maps")
-        target_file = os.path.join(target_dir, "bpsdata.txt")
-
-        try:
-            await aiofiles.os.makedirs(target_dir, exist_ok=True)
-            _LOGGER.info(
-                f"Folder {target_dir} has been created or already existed"
-            )
-        except Exception as e:
-            _LOGGER.error(
-                f"Could not create the folder {target_dir}: {e}"
-            )
-            return
-
-        # Panel registration was moved out of initialize_bps so a reload
-        # of the config entry can re-attach the sidebar — see _ensure_panel
-        # below, called from async_setup_entry on every load.
-
-        # Crear fichero bpsdata.txt si no existe
-        try:
-            if not os.path.exists(target_file):
-                async with aiofiles.open(target_file, mode="w") as file:
-                    await file.write("")
-                _LOGGER.info(f"File {target_file} has been created.")
-            else:
-                _LOGGER.info(f"File {target_file} already exist.")
-        except Exception as e:
-            _LOGGER.error(f"Could not create file {target_file}: {e}")
-
-        # Leer datos iniciales
-        await update_global_data(target_file)
-
-        # Watcher del fichero
-        observer = setup_file_watcher(
-            target_file, lambda: update_global_data(target_file), hass
-        )
-
-        # Native BLE scanner (replaces external Bermuda dependency).
-        scanner = hass.data[DOMAIN].get("scanner")
-        if scanner is None:
-            scanner = BleScanner(hass)
-            started = scanner.start()
-            if not started:
-                _LOGGER.error(
-                    "Native BLE scanner failed to start — distance "
-                    "estimation disabled. Make sure the bluetooth "
-                    "integration is loaded."
-                )
-            hass.data[DOMAIN]["scanner"] = scanner
-
-        # Track lifecycle handles so async_unload_entry can clean up.
-        bucket = hass.data[DOMAIN].setdefault(_BPS_DATA_KEY_TASKS, [])
-        positioning_task = hass.async_create_task(update_tracked_entities(hass))
-        bucket.append(positioning_task)
-
-        if observer is not None:
-            hass.data[DOMAIN][_BPS_DATA_KEY_OBSERVER] = observer
-
-        # Register HA-stop hooks ONCE per process. Reloading the entry
-        # would otherwise stack listeners and accumulate dead callbacks.
-        stop_listeners = hass.data[DOMAIN].setdefault(
-            _BPS_DATA_KEY_STOP_LISTENERS, {}
-        )
-        if "scanner" not in stop_listeners:
-            stop_listeners["scanner"] = hass.bus.async_listen_once(
-                "homeassistant_stop", lambda _e: scanner.stop()
-            )
-        if observer is not None and "observer" not in stop_listeners:
-            stop_listeners["observer"] = hass.bus.async_listen_once(
-                "homeassistant_stop",
-                lambda _e: observer.stop(),
-            )
-
-        _LOGGER.info("The BPS+ integration is fully initialized")
-
-    # Run initialization immediately — views, file watcher and BLE
-    # scanner do not require HA to be in a fully-started state, and
-    # gating on `homeassistant_started` made the BPS+ panel fail to
-    # load maps when the user opened it during boot (the
-    # `/api/bps/maps` endpoint had not been registered yet).
-    await initialize_bps()
+    bucket = hass.data[DOMAIN].setdefault(_BPS_DATA_KEY_TASKS, [])
+    init_task = hass.async_create_background_task(
+        _async_finish_init(hass), "bps_plus_init"
+    )
+    bucket.append(init_task)
 
     return True
 
@@ -1113,18 +1104,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["config_entry"] = entry
 
-    # Registrar la vista para servir el script.js dinámico de BPS+ —
-    # HA rejects duplicate registrations across reloads, so guard with a
-    # flag like the other views.
-    script_view_flag = f"{DOMAIN}_script_view_registered"
-    if not hass.data.get(script_view_flag):
-        hass.http.register_view(BpsPlusScriptView(hass, entry))
-        hass.data[script_view_flag] = True
-
     # Reutilizamos la inicialización general (APIs, watcher, scanner...).
-    # MUST run before forwarding to the sensor platform — otherwise
-    # sensor.py executes its discovery against an uninitialised BLE
-    # scanner and creates zero entities until the next refresh tick.
+    # Cheap registrations run inline; heavy init (BLE scanner, file
+    # watcher, positioning loop) runs as a background task so HA boot
+    # does not stall on this integration.
     await async_setup(hass, {})
 
     # Configurar sensores (sensor.py)
@@ -1509,62 +1492,6 @@ class BPSCordsAPI(HomeAssistantView):
             )
 
         return web.json_response(apitricords_local)
-
-
-class BpsPlusScriptView(HomeAssistantView):
-    """Sirve un script.js generado dinámicamente para BPS+."""
-
-    url = "/bps-plus/script.js"
-    name = "bps_plus:script"
-    requires_auth = True
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Inicializa la vista con acceso a hass y al entry."""
-        self.hass = hass
-        self.entry = entry
-
-    async def get(self, request: web.Request) -> web.Response:
-        """Devuelve el script con URL e intervalo inyectados."""
-
-        # Mezclamos data y options (options tiene prioridad)
-        data = {
-            **self.entry.data,
-            **self.entry.options,
-        }
-
-        base_url: str = data.get(CONF_BASE_URL, "").strip()
-        update_interval: int = int(
-            data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
-        )
-
-        # Ruta al template JS (compartido en el propio componente)
-        file_path = os.path.join(
-            os.path.dirname(__file__), "script_template.js"
-        )
-
-        try:
-            async with aiofiles.open(
-                file_path, mode="r", encoding="utf-8"
-            ) as f:
-                content = await f.read()
-        except FileNotFoundError:
-            return web.Response(
-                status=500,
-                text="// BPS+ error: script_template.js no encontrado en custom_components/bps_plus/",
-                content_type="application/javascript",
-            )
-
-        # Reemplazar marcadores por valores de la config
-        content = (
-            content.replace("__BASE_URL__", base_url)
-            .replace("__TOKEN__", "")
-            .replace("__UPDATE_INTERVAL__", str(update_interval * 1000))
-        )
-
-        return web.Response(
-            text=content,
-            content_type="application/javascript",
-        )
 
 
 class BPSEntityWebSocket:

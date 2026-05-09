@@ -10,7 +10,6 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import (
     DOMAIN,
     CONF_BASE_URL,
-    CONF_TOKEN,
     CONF_UPDATE_INTERVAL,
     CONF_STALE_AFTER,
     CONF_SCAN_INTERVAL,
@@ -32,7 +31,6 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             base_url = (user_input.get(CONF_BASE_URL) or "").strip()
-            token = (user_input.get(CONF_TOKEN) or "").strip()
             interval = user_input.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
 
             if base_url and not base_url.startswith(("http://", "https://")):
@@ -49,7 +47,6 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title="BPS+",
                     data={
                         CONF_BASE_URL: base_url,
-                        CONF_TOKEN: token,
                         CONF_UPDATE_INTERVAL: interval,
                         CONF_SCAN_INTERVAL: user_input.get(
                             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
@@ -60,13 +57,12 @@ class BpsPlusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
-        # base_url and token are optional now: the native BLE scanner
-        # does not need an external HA URL/token, and the frontend
-        # falls back to the page's own session when blank.
+        # base_url is optional: the native BLE scanner doesn't need an
+        # external HA URL, and the panel falls back to the page's own
+        # session when blank. Auth uses the HA panel cookie.
         schema = vol.Schema(
             {
                 vol.Optional(CONF_BASE_URL, default=""): str,
-                vol.Optional(CONF_TOKEN, default=""): str,
                 vol.Optional(CONF_UPDATE_INTERVAL, default=DEFAULT_UPDATE_INTERVAL): vol.Coerce(int),
                 vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.Coerce(int),
                 vol.Optional(CONF_STALE_AFTER, default=DEFAULT_STALE_AFTER): vol.Coerce(int),
@@ -97,7 +93,6 @@ class BpsPlusOptionsFlow(config_entries.OptionsFlow):
         schema = vol.Schema(
             {
                 vol.Optional(CONF_BASE_URL, default=options.get(CONF_BASE_URL, data.get(CONF_BASE_URL, ""))): str,
-                vol.Optional(CONF_TOKEN, default=options.get(CONF_TOKEN, data.get(CONF_TOKEN, ""))): str,
                 vol.Optional(
                     CONF_UPDATE_INTERVAL,
                     default=options.get(CONF_UPDATE_INTERVAL, data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)),
