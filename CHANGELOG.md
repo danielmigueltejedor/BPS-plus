@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.4] - 2026-05-09
+### Arranque (fix definitivo)
+- `sensor.py`: `_refresh_loop` (bucle de refresco de 2 s) y
+  `_async_refresh_entities` (re-discovery por cambios de estado)
+  pasan a `async_create_background_task`. Antes se creaban con
+  `async_create_task`, así que HA bloqueaba el bootstrap esperando
+  al bucle infinito y aparecía el aviso *"Setup timed out for
+  bootstrap waiting on Task pending ... bps_plus/sensor.py:514"* y
+  *"Something is blocking Home Assistant from wrapping up the start
+  up phase"*. Resuelto en la versión 1.8.2 para `__init__.py`, ahora
+  también para `sensor.py`.
+
 ## [1.8.3] - 2026-05-09
 ### Auth (fix 401 panel)
 - `BPSFrontendView` (`/bps/*`) vuelve a `requires_auth = False`. El

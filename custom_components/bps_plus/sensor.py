@@ -478,7 +478,11 @@ async def async_setup_entry(
         if refresh_task is not None and not refresh_task.done():
             return
 
-        refresh_task = hass.async_create_task(_async_refresh_entities())
+        # Background task: bootstrap will hang waiting for it otherwise
+        # (state-change driven, can fire during HA startup).
+        refresh_task = hass.async_create_background_task(
+            _async_refresh_entities(), "bps_plus_refresh_entities"
+        )
 
     unsub = hass.bus.async_listen(EVENT_STATE_CHANGED, _state_changed)
     config_entry.async_on_unload(unsub)
@@ -515,7 +519,12 @@ async def async_setup_entry(
             except asyncio.TimeoutError:
                 pass
 
-    refresh_loop_task = hass.async_create_task(_refresh_loop())
+    # Background: this loop runs forever. With async_create_task HA
+    # blocks bootstrap waiting for it ("Setup timed out for bootstrap"
+    # warning) and the start-up phase never wraps up.
+    refresh_loop_task = hass.async_create_background_task(
+        _refresh_loop(), "bps_plus_sensor_refresh_loop"
+    )
 
     def _cancel_refresh_loop() -> None:
         stop_event.set()
