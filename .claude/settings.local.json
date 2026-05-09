@@ -13,7 +13,8 @@
       "Bash(python3 -m py_compile custom_components/bps_plus/__init__.py custom_components/bps_plus/config_flow.py custom_components/bps_plus/const.py)",
       "Bash(python3 -m pytest tests/ -x --tb=short)",
       "Bash(python3 -m py_compile custom_components/bps_plus/__init__.py)",
-      "Bash(python3 -m py_compile custom_components/bps_plus/sensor.py)"
+      "Bash(python3 -m py_compile custom_components/bps_plus/sensor.py)",
+      "Bash(python3 -m py_compile custom_components/bps_plus/ble_scanner.py custom_components/bps_plus/__init__.py)"
     ]
   }
 }

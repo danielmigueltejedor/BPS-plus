@@ -161,6 +161,13 @@ class BleScanner:
             _LOGGER.error("Failed to subscribe to bluetooth advertisements: %s", err)
             return False
 
+        # Seed from already-discovered advs so the engine has devices
+        # to query on the very first positioning tick.
+        try:
+            self.seed_from_discovered()
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("Initial seed_from_discovered failed: %s", err)
+
         _LOGGER.info("BPS+ native BLE scanner active")
         return True
 
@@ -262,6 +269,99 @@ class BleScanner:
             link.last_seen = now
         except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("BLE adv handler error: %s", err)
+
+    def refresh_from_scanners(self) -> None:
+        """Pull per-scanner RSSI for every known device.
+
+        HA's `async_register_callback` (used in `start()`) deduplicates
+        advertisements by design: the callback fires once per adv with
+        the "best" source set, NOT once per scanner-that-saw-it. Result:
+        our `links` map only ever covered 1-2 proxies per device even
+        when 4-5 physically saw it, so `candidate_targets(min_scanners=3)`
+        never triggered and no distances were produced.
+
+        `async_scanner_devices_by_address` returns the FULL set of
+        scanners currently tracking a given MAC, each with its own
+        RSSI. That is the same data path Bermuda uses, which is why
+        Bermuda produced distances on the same hardware while we did
+        not. Called every positioning tick from the engine loop.
+        """
+        try:
+            from homeassistant.components import bluetooth
+        except ImportError:
+            return
+        if not self.devices:
+            return
+        now = time.monotonic()
+        for identity, meta in list(self.devices.items()):
+            target_mac = meta.current_mac or normalize_mac(identity)
+            if not target_mac:
+                continue
+            try:
+                results = bluetooth.async_scanner_devices_by_address(
+                    self.hass, target_mac, connectable=False,
+                )
+            except Exception as err:  # pragma: no cover - defensive
+                _LOGGER.debug(
+                    "scanner_devices_by_address failed for %s: %s",
+                    target_mac, err,
+                )
+                continue
+            for r in results or []:
+                try:
+                    source = str(r.scanner.source).upper()
+                    rssi = float(r.advertisement.rssi)
+                except Exception:
+                    continue
+                if not math.isfinite(rssi) or rssi >= 0:
+                    continue
+                scanner_meta = self.scanners.get(source)
+                if scanner_meta is None:
+                    scanner_meta = ScannerMeta(
+                        source=source,
+                        name=self._resolve_scanner_name(source),
+                    )
+                    self.scanners[source] = scanner_meta
+                scanner_meta.last_seen = now
+
+                key = (identity, source)
+                link = self.links.get(key)
+                if link is None:
+                    link = LinkState(
+                        tx_power=(meta.tx_power_adv
+                                  if meta.tx_power_adv is not None
+                                  else DEFAULT_TX_POWER),
+                    )
+                    self.links[key] = link
+                link.last_rssi = rssi
+                if link.rssi_ewma is None:
+                    link.rssi_ewma = rssi
+                else:
+                    link.rssi_ewma = (
+                        (1 - self.alpha) * link.rssi_ewma + self.alpha * rssi
+                    )
+                link.last_seen = now
+
+    def seed_from_discovered(self) -> None:
+        """Bootstrap device table from currently-known service infos.
+
+        Pulls every adv HA's bluetooth manager has cached so we don't
+        have to wait for the next adv cycle to see devices the
+        callback already missed. Cheap; safe to call repeatedly.
+        """
+        try:
+            from homeassistant.components import bluetooth
+        except ImportError:
+            return
+        try:
+            infos = bluetooth.async_discovered_service_info(
+                self.hass, connectable=False,
+            )
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("async_discovered_service_info failed: %s", err)
+            return
+        for info in infos or []:
+            self._on_adv(info, None)
 
     def set_alias(self, mac: str, alias_id: str) -> None:
         """Bind a rotating MAC to a stable identity (e.g. an IRK token).

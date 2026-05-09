@@ -449,6 +449,14 @@ async def update_tracked_entities(hass, _unused=None):
                 _prune_engine_state(scanner, now_mono)
                 last_prune = now_mono
 
+            # Pull per-scanner RSSI for every known device. HA's adv
+            # callback dedupes, so without this we only ever see 1-2
+            # proxies per device and `candidate_targets(min=3)` is
+            # always empty — same root cause Bermuda sidesteps by
+            # querying scanner_devices_by_address directly.
+            scanner.seed_from_discovered()
+            scanner.refresh_from_scanners()
+
             # Discovery + alias setup MUST run every tick before checking
             # candidates. Otherwise rotating-MAC devices (Apple Watch,
             # iPhones via private_ble_device) never get aliased to a

@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.5] - 2026-05-10
+### BLE / distancias (paridad con Bermuda)
+- `BleScanner.refresh_from_scanners`: por cada device conocido,
+  consulta `bluetooth.async_scanner_devices_by_address` para obtener
+  el RSSI individual de TODOS los proxies que lo ven. La función se
+  llama cada tick del bucle de posicionamiento, antes de
+  `candidate_targets`.
+- Causa: HA's `async_register_callback` deduplica los advertisements
+  y solo dispara el callback con la "mejor" fuente. Por eso `links`
+  solo cubría 1–2 proxies por device aunque físicamente lo vieran
+  4–5, y `candidate_targets(min_scanners=3)` nunca se cumplía. Ese
+  era el motivo de que solo un sensor diera valores y de que Bermuda
+  sí funcionara: Bermuda usa exactamente esta API.
+- `BleScanner.seed_from_discovered`: en el arranque y cada tick,
+  recorre `bluetooth.async_discovered_service_info` para sembrar
+  devices nuevos sin esperar a que llegue el siguiente adv.
+
 ## [1.8.4] - 2026-05-09
 ### Arranque (fix definitivo)
 - `sensor.py`: `_refresh_loop` (bucle de refresco de 2 s) y
