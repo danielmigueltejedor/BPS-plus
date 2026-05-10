@@ -87,7 +87,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const calProPickPositionButton = document.getElementById('calProPickPosition');
     const calProClearPositionButton = document.getElementById('calProClearPosition');
     const calProAutoButton = document.getElementById('calProAuto');
+    const calProComputeButton = document.getElementById('calProCompute');
+    const calProResetButton = document.getElementById('calProReset');
     const calProStatus = document.getElementById('calProStatus');
+    const calProCoverage = document.getElementById('calProCoverage');
     const saveButton = document.createElement('button');
 
     //Delete button
@@ -132,6 +135,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     let wallStartPoint = null;
     const wallPenaltyPresets = [0.8, 1.6, 2.5, 3.4, 4.5, 6.0];
     let proCalibrationPoint = null;
+    // Multi-position Pro state. Per-receiver list of {observed, measured, x, y, n}
+    // where `observed` is the median of N raw distance reads from a single
+    // 15s session at one mapped position. One entry per receiver per position.
+    const proSamplesByReceiver = {};
+    const proPositionsLog = []; // [{floor, x, y, captured: Set<receiverId>}]
     let proPickPositionPending = false;
     // Live BT proxy list, fetched from /api/bps/scanners. Used to fill
     // the receiver-placement dropdown so users pick a real proxy by
@@ -656,6 +664,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (calProPickPositionButton) calProPickPositionButton.addEventListener("click", startProPositionPick);
         if (calProClearPositionButton) calProClearPositionButton.addEventListener("click", clearProPositionMarker);
         if (calProAutoButton) calProAutoButton.addEventListener("click", runProAutoCalibration);
+        if (calProComputeButton) calProComputeButton.addEventListener("click", computeProCalibrationFromAccumulated);
+        if (calProResetButton) calProResetButton.addEventListener("click", resetProCalibration);
     
     
     // Check if the image is loaded in the canvas
@@ -860,36 +870,104 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function computeAutoCalibrationForSamples(samples) {
-        let factor = 1;
-        let offset = 0;
-        if (!samples || samples.length === 0) {
-            return null;
-        }
+        // Robust solver:
+        //  - 1 sample: scale-only, factor = measured/observed.
+        //  - >=2 samples but degenerate (all observed ~equal OR all measured ~equal):
+        //      fall back to scale-only using means; offset stays 0.
+        //  - >=2 samples, well-conditioned: linear least squares
+        //      measured = factor*observed + offset.
+        //  Output is clamped to plausible BLE ranges to avoid pathological fits.
+        if (!samples || samples.length === 0) return null;
+
+        const FACTOR_MIN = 0.2, FACTOR_MAX = 5.0;
+        const OFFSET_MIN = -10, OFFSET_MAX = 10;
+        const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+        let factor = 1, offset = 0;
+
         if (samples.length === 1) {
-            const only = samples[0];
-            factor = only.measured / only.observed;
+            const o = samples[0];
+            if (!(o.observed > 0)) return null;
+            factor = o.measured / o.observed;
         } else {
             const n = samples.length;
-            const sumX = samples.reduce((acc, s) => acc + s.observed, 0);
-            const sumY = samples.reduce((acc, s) => acc + s.measured, 0);
-            const sumXY = samples.reduce((acc, s) => acc + (s.observed * s.measured), 0);
-            const sumXX = samples.reduce((acc, s) => acc + (s.observed * s.observed), 0);
-            const denominator = (n * sumXX) - (sumX * sumX);
-            if (Math.abs(denominator) < 1e-9) {
-                factor = samples.reduce((acc, s) => acc + (s.measured / s.observed), 0) / n;
+            const sumX = samples.reduce((a, s) => a + s.observed, 0);
+            const sumY = samples.reduce((a, s) => a + s.measured, 0);
+            const meanX = sumX / n, meanY = sumY / n;
+            const varX = samples.reduce((a, s) => a + (s.observed - meanX) ** 2, 0);
+            const varY = samples.reduce((a, s) => a + (s.measured - meanY) ** 2, 0);
+            // Degenerate: no spread on one axis → can't fit slope+intercept.
+            // Fall back to scale-only via mean ratio so user still gets a usable fit.
+            if (varX < 1e-6 || varY < 1e-6) {
+                if (!(meanX > 0)) return null;
+                factor = meanY / meanX;
                 offset = 0;
             } else {
-                factor = ((n * sumXY) - (sumX * sumY)) / denominator;
-                offset = (sumY - (factor * sumX)) / n;
+                const sumXY = samples.reduce((a, s) => a + s.observed * s.measured, 0);
+                const sumXX = samples.reduce((a, s) => a + s.observed * s.observed, 0);
+                const denom = n * sumXX - sumX * sumX;
+                factor = (n * sumXY - sumX * sumY) / denom;
+                offset = (sumY - factor * sumX) / n;
+                // If LS produced an unusable slope, retry as scale-only.
+                if (!Number.isFinite(factor) || factor <= 0) {
+                    factor = meanY / meanX;
+                    offset = 0;
+                }
             }
         }
-        if (!Number.isFinite(factor) || factor <= 0) {
-            return null;
-        }
-        if (!Number.isFinite(offset)) {
-            offset = 0;
-        }
-        return { factor, offset };
+
+        if (!Number.isFinite(factor) || factor <= 0) return null;
+        if (!Number.isFinite(offset)) offset = 0;
+        factor = clamp(factor, FACTOR_MIN, FACTOR_MAX);
+        offset = clamp(offset, OFFSET_MIN, OFFSET_MAX);
+
+        // RMSE on the calibrated samples — useful diagnostic.
+        let rmse = 0;
+        samples.forEach(s => {
+            const pred = s.observed * factor + offset;
+            rmse += (pred - s.measured) ** 2;
+        });
+        rmse = Math.sqrt(rmse / samples.length);
+
+        return { factor, offset, rmse };
+    }
+
+    function median(values) {
+        const arr = values.filter(v => Number.isFinite(v) && v > 0).slice().sort((a, b) => a - b);
+        if (arr.length === 0) return null;
+        const mid = Math.floor(arr.length / 2);
+        return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+    }
+
+    function getReceiverDisplayName(receiver) {
+        if (!receiver) return "";
+        const id = receiver.entity_id || "";
+        const match = (availableScanners || []).find(s => s && s.id === id);
+        return (match && match.name) || receiver.name || id;
+    }
+
+    function refreshProCoverage() {
+        if (!calProCoverage) return;
+        const floor = getCurrentFloor();
+        if (!floor) { calProCoverage.textContent = ""; return; }
+        const receivers = floor.receivers || [];
+        const lines = receivers.map(r => {
+            const samples = proSamplesByReceiver[r.entity_id] || [];
+            const display = getReceiverDisplayName(r);
+            return `· ${display}: ${samples.length} pos.`;
+        });
+        const header = `Posiciones capturadas: ${proPositionsLog.length}`;
+        calProCoverage.textContent = receivers.length ? `${header}\n${lines.join("\n")}` : header;
+        calProCoverage.style.whiteSpace = "pre-line";
+    }
+
+    function resetProCalibration() {
+        Object.keys(proSamplesByReceiver).forEach(k => delete proSamplesByReceiver[k]);
+        proPositionsLog.length = 0;
+        proCalibrationPoint = null;
+        updateProStatus("Pro: muestras eliminadas. Marca una posición y captura para empezar de nuevo.");
+        refreshProCoverage();
+        if (checkCanvasImage()) { clearCanvas(); drawElements(); }
     }
 
     function getRealDistanceMeters(point, receiver, floor) {
@@ -904,6 +982,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function runProAutoCalibration() {
+        // Capture phase: 15s at the currently marked position. Per receiver,
+        // collect raw distance reads and store ONE aggregated sample
+        // (median observed, true measured) into proSamplesByReceiver. Multiple
+        // calls from different positions accumulate the data needed for a
+        // proper linear fit (factor + offset). Compute is a separate button.
         const floor = getCurrentFloor();
         const deviceId = calEntitySelect?.value || "";
         if (!floor || !Number.isFinite(Number(floor.scale)) || Number(floor.scale) <= 0) {
@@ -918,61 +1001,112 @@ document.addEventListener('DOMContentLoaded', async () => {
             alert("Primero marca tu posición real en este mapa.");
             return;
         }
-        updateProStatus("Pro: capturando durante 15 segundos... espera sin moverte.");
 
-        const sessionCaptured = new Set();
         const receivers = floor.receivers || [];
+        const rawByReceiver = {};
+        receivers.forEach(r => { rawByReceiver[r.entity_id] = []; });
 
-        for (let t = 0; t < 15; t++) {
+        const SECONDS = 15;
+        for (let t = 0; t < SECONDS; t++) {
             await Promise.all(
                 receivers.map(async (receiver) => {
                     const receiverId = receiver.entity_id;
                     try {
                         const observed = await readStateValue("", deviceId, receiverId);
-                        if (!Number.isFinite(observed) || observed <= 0) {
-                            return;
+                        if (Number.isFinite(observed) && observed > 0) {
+                            rawByReceiver[receiverId].push(observed);
                         }
-                        const measured = getRealDistanceMeters(proCalibrationPoint, receiver, floor);
-                        if (!Number.isFinite(measured) || measured <= 0) {
-                            return;
-                        }
-                        calibrationSamples[receiverId] = calibrationSamples[receiverId] || [];
-                        calibrationSamples[receiverId].push({ observed, measured });
-                        sessionCaptured.add(receiverId);
                     } catch (err) {
-                        // Receiver/device pair has no readable value in this snapshot.
+                        // Receiver/device pair has no readable value this tick.
                     }
                 })
             );
-            updateProStatus(`Pro: capturando... ${t + 1}/15 s`);
+            updateProStatus(`Pro: capturando posición ${proPositionsLog.length + 1}... ${t + 1}/${SECONDS}s`);
             await delay(1000);
         }
 
-        let calibratedCount = 0;
-        receivers.forEach((receiver) => {
-            const samples = calibrationSamples[receiver.entity_id] || [];
-            const result = computeAutoCalibrationForSamples(samples);
-            if (!result) {
-                return;
-            }
-            receiver.calibration = {
-                factor: result.factor,
-                offset: result.offset,
-            };
-            calibratedCount += 1;
+        const sessionCaptured = new Set();
+        let stored = 0;
+        receivers.forEach(receiver => {
+            const reads = rawByReceiver[receiver.entity_id] || [];
+            const med = median(reads);
+            if (med == null) return;
+            const measured = getRealDistanceMeters(proCalibrationPoint, receiver, floor);
+            if (!Number.isFinite(measured) || measured <= 0) return;
+            proSamplesByReceiver[receiver.entity_id] = proSamplesByReceiver[receiver.entity_id] || [];
+            proSamplesByReceiver[receiver.entity_id].push({
+                observed: med,
+                measured,
+                x: proCalibrationPoint.x,
+                y: proCalibrationPoint.y,
+                n: reads.length,
+            });
+            sessionCaptured.add(receiver.entity_id);
+            stored += 1;
         });
 
-        const missingNow = receivers
-            .map(r => r.entity_id)
-            .filter(id => !sessionCaptured.has(id));
+        proPositionsLog.push({
+            floor: floor.name,
+            x: proCalibrationPoint.x,
+            y: proCalibrationPoint.y,
+            captured: sessionCaptured,
+        });
+
+        const missing = receivers
+            .filter(r => !sessionCaptured.has(r.entity_id))
+            .map(getReceiverDisplayName);
+        const needMore = receivers.filter(
+            r => (proSamplesByReceiver[r.entity_id] || []).length < 2
+        ).map(getReceiverDisplayName);
+
+        let msg = `Pro: posición ${proPositionsLog.length} capturada (${stored}/${receivers.length} receptores con señal).`;
+        if (missing.length > 0) {
+            msg += ` Sin señal aquí: ${missing.join(", ")}. Acércate y repite.`;
+        }
+        if (needMore.length > 0) {
+            msg += ` Necesitan más posiciones (mín. 2): ${needMore.join(", ")}.`;
+        } else {
+            msg += " Todos los receptores tienen ≥2 posiciones — pulsa \"Calcular calibración Pro\".";
+        }
+        updateProStatus(msg);
+        refreshProCoverage();
+    }
+
+    function computeProCalibrationFromAccumulated() {
+        const floor = getCurrentFloor();
+        if (!floor) { alert("Selecciona una planta."); return; }
+        const receivers = floor.receivers || [];
+        if (receivers.length === 0) { alert("No hay receptores en esta planta."); return; }
+
+        let calibrated = 0, scaleOnly = 0;
+        const details = [];
+        receivers.forEach(receiver => {
+            const samples = proSamplesByReceiver[receiver.entity_id] || [];
+            if (samples.length === 0) return;
+            const result = computeAutoCalibrationForSamples(samples);
+            if (!result) return;
+            receiver.calibration = { factor: result.factor, offset: result.offset };
+            calibrated += 1;
+            if (samples.length < 2) scaleOnly += 1;
+            details.push(
+                `${getReceiverDisplayName(receiver)}: f=${result.factor.toFixed(3)} o=${result.offset.toFixed(2)}m rmse=${(result.rmse ?? 0).toFixed(2)}m (${samples.length} pos)`
+            );
+        });
         savebuttondiv.appendChild(saveButton);
         drawElements();
-        if (missingNow.length > 0) {
-            updateProStatus(
-                `Pro: calibrados ${calibratedCount}/${receivers.length}. Mueve el móvil hacia: ${missingNow.join(", ")} y repite.`
-            );
-        } else {
-            updateProStatus(`Pro: calibración completada para ${calibratedCount}/${receivers.length} receptores.`);
+
+        const noData = receivers
+            .filter(r => (proSamplesByReceiver[r.entity_id] || []).length === 0)
+            .map(getReceiverDisplayName);
+
+        let msg = `Pro: calibrados ${calibrated}/${receivers.length}.`;
+        if (scaleOnly > 0) msg += ` ${scaleOnly} con sólo 1 posición (sólo escala — captura otra).`;
+        if (noData.length > 0) msg += ` Sin datos: ${noData.join(", ")}.`;
+        msg += " Recuerda guardar la planta para persistir la calibración.";
+        updateProStatus(msg);
+        if (calProCoverage) {
+            calProCoverage.textContent = details.join("\n") || "";
+            calProCoverage.style.whiteSpace = "pre-line";
         }
     }
 

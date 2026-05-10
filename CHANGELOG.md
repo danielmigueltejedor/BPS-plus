@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.6] - 2026-05-10
+### Calibración Pro (multi-posición + mediana)
+- `frontend/script.js`: el flujo Pro deja de calibrar desde una única
+  posición (matemáticamente degenerado: `measured` constante producía
+  `factor = 0` y todos los receptores eran rechazados → mensaje
+  "calibrados 0/6"). Ahora cada sesión de 15 s en una posición marcada
+  guarda **una sola muestra agregada** por receptor: `observed = mediana`
+  de N lecturas crudas, `measured = distancia real al receptor`. Se
+  acumulan posiciones; el botón nuevo *"Calcular calibración Pro"*
+  ajusta `factor + offset` por mínimos cuadrados sólo cuando hay ≥2
+  posiciones por receptor.
+- Solver robusto: clamp `factor ∈ [0.2, 5.0]`, `offset ∈ [-10, 10]`,
+  fallback a escala-pura cuando la regresión es degenerada (varianza
+  nula en `observed` o `measured`), RMSE expuesto al usuario.
+- UI: botones nuevos *"Capturar 15s en esta posición"*,
+  *"Calcular calibración Pro"*, *"Reset Pro"*. Estado de cobertura
+  por receptor (nº de posiciones, factor/offset, RMSE) y mensajes con
+  el nombre legible del proxy en lugar del slug.
+- La mediana mata el ruido del iPhone parado: aunque la lectura
+  individual oscila, una sola muestra por sesión usa la mediana de
+  ~15 muestras → mucho más estable.
+
 ## [1.8.5] - 2026-05-10
 ### BLE / distancias (paridad con Bermuda)
 - `BleScanner.refresh_from_scanners`: por cada device conocido,
