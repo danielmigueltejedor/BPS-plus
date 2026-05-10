@@ -41,6 +41,9 @@ STALE_AFTER = 90.0         # seconds after which a link is considered dead
 DISTANCE_CAP_M = 60.0      # indoor multipath rarely makes >60 m credible
 MIN_FIT_SAMPLES = 5
 MAX_FIT_SAMPLES = 60
+# Time-weighted EWMA constant (seconds). Burst arrivals after a long
+# silence weight as if the inter-arrival time were ~RSSI_TAU, not zero.
+RSSI_TAU = 1.5
 # Drop devices and links unseen for this many seconds. Bounds memory
 # growth when transient devices fly through the BLE field (neighbours,
 # delivery riders, AirTags from passers-by, ...).
@@ -79,7 +82,13 @@ def rssi_to_distance(rssi: float, tx_power: float, n: float) -> float:
 
 @dataclass
 class LinkState:
-    """Per-(device, scanner) running state."""
+    """Per-(device, scanner) running state.
+
+    `samples` holds (raw_rssi_at_sample_time, true_distance_m) pairs used
+    to refit the path-loss model. We store the RAW rssi present when the
+    stationary anchor was captured (not the EWMA, which lags by tau on
+    sparse advertisers like an iPhone with the screen off).
+    """
     rssi_ewma: float | None = None
     last_rssi: float | None = None
     last_seen: float = 0.0
@@ -265,7 +274,16 @@ class BleScanner:
             if link.rssi_ewma is None:
                 link.rssi_ewma = r
             else:
-                link.rssi_ewma = (1 - self.alpha) * link.rssi_ewma + self.alpha * r
+                # Time-weighted EWMA: a burst of advertisements after a
+                # long silence MUST NOT collapse history into the burst.
+                # Effective alpha shrinks as the inter-arrival time
+                # shrinks below RSSI_TAU.
+                dt = max(0.0, now - link.last_seen)
+                eff_alpha = 1.0 - math.exp(-dt / RSSI_TAU) if dt > 0 else 0.0
+                eff_alpha = max(0.0, min(self.alpha, eff_alpha))
+                link.rssi_ewma = (
+                    (1 - eff_alpha) * link.rssi_ewma + eff_alpha * r
+                )
             link.last_seen = now
         except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("BLE adv handler error: %s", err)
@@ -337,8 +355,13 @@ class BleScanner:
                 if link.rssi_ewma is None:
                     link.rssi_ewma = rssi
                 else:
+                    dt = max(0.0, now - link.last_seen)
+                    eff_alpha = (
+                        1.0 - math.exp(-dt / RSSI_TAU) if dt > 0 else 0.0
+                    )
+                    eff_alpha = max(0.0, min(self.alpha, eff_alpha))
                     link.rssi_ewma = (
-                        (1 - self.alpha) * link.rssi_ewma + self.alpha * rssi
+                        (1 - eff_alpha) * link.rssi_ewma + eff_alpha * rssi
                     )
                 link.last_seen = now
 
@@ -546,14 +569,24 @@ class BleScanner:
     # -- Calibration --------------------------------------------------------
 
     def add_calibration_sample(
-        self, identity: str, source: str, true_distance_m: float
+        self, identity: str, source: str, true_distance_m: float,
     ) -> None:
+        """Record a (rssi, true_distance_m) pair for the link.
+
+        Prefers the RAW last RSSI (sample time) over the EWMA. With sparse
+        advertisers like an iPhone the EWMA can lag several seconds behind
+        the last advertisement, which biases path-loss fits toward stale
+        RSSI readings that no longer match the captured anchor distance.
+        """
         link = self.links.get((self._identity_key(identity), source.upper()))
-        if link is None or link.rssi_ewma is None:
+        if link is None:
+            return
+        rssi = link.last_rssi if link.last_rssi is not None else link.rssi_ewma
+        if rssi is None:
             return
         if true_distance_m <= 0.05 or not math.isfinite(true_distance_m):
             return
-        link.samples.append((float(link.rssi_ewma), float(true_distance_m)))
+        link.samples.append((float(rssi), float(true_distance_m)))
         if len(link.samples) > MAX_FIT_SAMPLES:
             link.samples.pop(0)
         self._fit_path_loss(link)
@@ -581,6 +614,75 @@ class BleScanner:
             return
         link.tx_power = tx_power
         link.path_loss = n
+
+    # -- Persistence --------------------------------------------------------
+
+    def export_calibration(self) -> dict:
+        """Serialise per-link path-loss fits + raw samples for disk storage.
+
+        Aliases are exported too so an IRK-resolved identity survives a
+        restart even before private_ble_device republishes its
+        ``current_address``. Only links with at least one sample are
+        included; defaults are reconstructed on next adv.
+        """
+        out_links: list[dict] = []
+        for (identity, source), link in self.links.items():
+            if not link.samples and link.tx_power == DEFAULT_TX_POWER and link.path_loss == DEFAULT_PATH_LOSS:
+                continue
+            out_links.append({
+                "identity": identity,
+                "source": source,
+                "tx_power": float(link.tx_power),
+                "path_loss": float(link.path_loss),
+                "samples": [[float(r), float(d)] for r, d in link.samples[-MAX_FIT_SAMPLES:]],
+            })
+        return {
+            "version": 1,
+            "aliases": dict(self._aliases),
+            "links": out_links,
+        }
+
+    def import_calibration(self, payload: dict | None) -> int:
+        """Restore previously-saved per-link calibration.
+
+        Returns the number of links restored. Silently ignores malformed
+        rows so a partially-corrupted file does not block the engine.
+        """
+        if not payload or not isinstance(payload, dict):
+            return 0
+        restored = 0
+        for mac, alias in (payload.get("aliases") or {}).items():
+            if isinstance(mac, str) and isinstance(alias, str):
+                self._aliases[mac.upper()] = alias
+        for row in payload.get("links") or []:
+            try:
+                identity = str(row["identity"])
+                source = str(row["source"]).upper()
+                tx_power = float(row.get("tx_power", DEFAULT_TX_POWER))
+                path_loss = float(row.get("path_loss", DEFAULT_PATH_LOSS))
+                samples_raw = row.get("samples") or []
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (-95.0 <= tx_power <= -25.0):
+                tx_power = DEFAULT_TX_POWER
+            if not (1.5 <= path_loss <= 5.0):
+                path_loss = DEFAULT_PATH_LOSS
+            samples: list[tuple[float, float]] = []
+            for entry in samples_raw[-MAX_FIT_SAMPLES:]:
+                try:
+                    r = float(entry[0]); d = float(entry[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if math.isfinite(r) and math.isfinite(d) and d > 0:
+                    samples.append((r, d))
+            key = (identity, source)
+            link = self.links.get(key) or LinkState()
+            link.tx_power = tx_power
+            link.path_loss = path_loss
+            link.samples = samples
+            self.links[key] = link
+            restored += 1
+        return restored
 
     # -- Diagnostics --------------------------------------------------------
 

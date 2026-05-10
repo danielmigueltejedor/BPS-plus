@@ -1,7 +1,7 @@
 """BPS+ positioning engine.
 
 Self-contained module that provides:
-  * Per-link distance smoothing with MAD-based outlier rejection.
+  * Per-link distance smoothing (time-weighted EWMA + MAD outlier reject).
   * Robust weighted nonlinear-least-squares trilateration with HDOP.
   * Constant-velocity Kalman filter for position smoothing.
   * Stationarity detection for opportunistic auto-calibration.
@@ -24,9 +24,17 @@ from typing import Iterable, Sequence
 
 import numpy as np
 from scipy.optimize import least_squares
-from shapely.geometry import LineString
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Calibration factor/offset clamps shared by Python and JS so a fit accepted
+# in the panel is also accepted by the engine. Must match the JS constants
+# in frontend/script.js:computeAutoCalibrationForSamples.
+CAL_FACTOR_MIN = 0.2
+CAL_FACTOR_MAX = 5.0
+CAL_OFFSET_MIN = -10.0
+CAL_OFFSET_MAX = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -37,10 +45,6 @@ def apply_calibration(raw_distance: float, calibration: dict | None) -> float:
     """Apply a path-loss-style correction to a raw distance (meters).
 
     Model:  corrected = factor * raw**exponent + offset
-
-    Exponent defaults to 1.0 so the formula degenerates to the previous
-    affine correction the UI already exposes, while leaving room for
-    auto-calibration to fit a non-linear path-loss curve later.
     """
     if raw_distance is None:
         return float("nan")
@@ -68,34 +72,48 @@ def apply_calibration(raw_distance: float, calibration: dict | None) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Per-link distance smoother
+# Per-link distance smoother (time-weighted EWMA + MAD outlier reject)
 # ---------------------------------------------------------------------------
 
 class DistanceSmoother:
     """EWMA smoother with MAD-based outlier rejection.
 
-    Replaces the prior ±50% gate, which was simultaneously too lax in
-    stable conditions (allowing huge jumps to slip through) and too strict
-    when readings legitimately changed quickly. MAD is scale-invariant and
-    adapts to each link's noise floor.
+    Time-weighted: alpha is recomputed per sample as ``1 - exp(-Δt / tau)``
+    so a burst of advertisements after a long silence does NOT collapse the
+    history into the burst. Falls back to ``base_alpha`` when no timestamp
+    is supplied (legacy callers).
     """
 
-    __slots__ = ("alpha", "window", "mad_threshold", "_history", "_ewma", "_var")
+    __slots__ = (
+        "base_alpha",
+        "tau",
+        "window",
+        "mad_threshold",
+        "_history",
+        "_ewma",
+        "_var",
+        "_last_t",
+    )
 
     def __init__(
         self,
         alpha: float = 0.4,
         window: int = 8,
         mad_threshold: float = 3.5,
+        tau_seconds: float = 1.5,
     ) -> None:
-        self.alpha = float(alpha)
+        self.base_alpha = float(alpha)
+        self.tau = max(0.1, float(tau_seconds))
         self.window = int(window)
         self.mad_threshold = float(mad_threshold)
         self._history: list[float] = []
         self._ewma: float | None = None
         self._var: float = 0.0
+        self._last_t: float | None = None
 
-    def push(self, value: float) -> tuple[float | None, float, bool]:
+    def push(
+        self, value: float, t: float | None = None
+    ) -> tuple[float | None, float, bool]:
         """Feed a new sample. Returns (smoothed_value, sigma, accepted)."""
         if value is None or not math.isfinite(value) or value < 0:
             sigma = math.sqrt(self._var) if self._var > 0 else 1.0
@@ -118,9 +136,23 @@ class DistanceSmoother:
                 self._ewma = value
                 self._var = 0.0
             else:
+                # Time-weighted alpha so a burst after a long gap does not
+                # over-write the smoother. Older samples decay exponentially
+                # with time constant `tau`. When no timestamp is supplied we
+                # fall back to the classic constant alpha.
+                if t is not None and self._last_t is not None:
+                    dt = max(0.0, float(t) - float(self._last_t))
+                    eff_alpha = 1.0 - math.exp(-dt / self.tau) if dt > 0 else 0.0
+                    eff_alpha = max(0.0, min(self.base_alpha, eff_alpha))
+                else:
+                    eff_alpha = self.base_alpha
                 delta = value - self._ewma
-                self._ewma = self._ewma + self.alpha * delta
-                self._var = (1.0 - self.alpha) * (self._var + self.alpha * delta * delta)
+                self._ewma = self._ewma + eff_alpha * delta
+                self._var = (
+                    (1.0 - eff_alpha) * (self._var + eff_alpha * delta * delta)
+                )
+            if t is not None:
+                self._last_t = float(t)
 
         if self._var > 0:
             sigma = math.sqrt(self._var)
@@ -150,8 +182,16 @@ class DistanceSample:
     sigma_px: float
 
 
-def _wall_segments(walls: Iterable[dict] | None) -> list[LineString]:
-    out: list[LineString] = []
+def _walls_to_array(walls: Iterable[dict] | None) -> np.ndarray:
+    """Pack wall segments into an (N, 4) numpy array [x1, y1, x2, y2].
+
+    Replaces the previous shapely LineString implementation, which
+    allocated 4-12 Python objects per residual evaluation. With 5 walls
+    and 6 receivers `least_squares` evaluates residuals ~80 times → 240+
+    shapely allocs per fit. The numpy version vectorises the segment-vs-
+    segment intersection test and is ~30× faster on typical floors.
+    """
+    rows: list[list[float]] = []
     for wall in walls or []:
         try:
             x1 = float(wall.get("x1")); y1 = float(wall.get("y1"))
@@ -160,23 +200,51 @@ def _wall_segments(walls: Iterable[dict] | None) -> list[LineString]:
             continue
         if x1 == x2 and y1 == y2:
             continue
-        out.append(LineString([(x1, y1), (x2, y2)]))
-    return out
+        rows.append([x1, y1, x2, y2])
+    return np.asarray(rows, dtype=float) if rows else np.empty((0, 4))
 
 
-def _wall_crossings(path: LineString, segments: Sequence[LineString]) -> int:
-    n = 0
-    for seg in segments:
-        if not path.intersects(seg):
-            continue
-        inter = path.intersection(seg)
-        if inter.is_empty:
-            continue
-        if inter.geom_type in ("LineString", "MultiLineString"):
-            # Path collinear with a wall -> ignore to avoid over-penalizing.
-            continue
-        n += 1
-    return n
+def _count_crossings_vec(
+    px: float, py: float, ex: np.ndarray, ey: np.ndarray, walls: np.ndarray
+) -> np.ndarray:
+    """Count wall crossings for paths from (px, py) to each (ex[i], ey[i]).
+
+    Uses standard segment-segment intersection in screen coordinates.
+    Collinear hits return 0 so a path running along a wall is not
+    over-penalised — same convention as the previous shapely impl.
+
+    Returns int array of length ``len(ex)``.
+    """
+    n_paths = len(ex)
+    if walls.size == 0 or n_paths == 0:
+        return np.zeros(n_paths, dtype=int)
+
+    # Path endpoints repeated for each wall: shape (n_paths, n_walls)
+    n_walls = walls.shape[0]
+    p1x = np.full((n_paths, n_walls), px)
+    p1y = np.full((n_paths, n_walls), py)
+    p2x = np.broadcast_to(ex.reshape(-1, 1), (n_paths, n_walls))
+    p2y = np.broadcast_to(ey.reshape(-1, 1), (n_paths, n_walls))
+    p3x = np.broadcast_to(walls[:, 0], (n_paths, n_walls))
+    p3y = np.broadcast_to(walls[:, 1], (n_paths, n_walls))
+    p4x = np.broadcast_to(walls[:, 2], (n_paths, n_walls))
+    p4y = np.broadcast_to(walls[:, 3], (n_paths, n_walls))
+
+    d1x = p2x - p1x; d1y = p2y - p1y
+    d2x = p4x - p3x; d2y = p4y - p3y
+    denom = d1x * d2y - d1y * d2x
+
+    # Collinear (denom == 0) → ignore. Use the parametric form for the rest.
+    safe = np.where(np.abs(denom) < 1e-9, 1.0, denom)
+    t = ((p3x - p1x) * d2y - (p3y - p1y) * d2x) / safe
+    u = ((p3x - p1x) * d1y - (p3y - p1y) * d1x) / safe
+
+    hits = (
+        (np.abs(denom) >= 1e-9)
+        & (t > 0.0) & (t < 1.0)
+        & (u > 0.0) & (u < 1.0)
+    )
+    return hits.sum(axis=1).astype(int)
 
 
 def initial_guess_centroid(
@@ -195,22 +263,13 @@ def trilaterate_robust(
     walls: Iterable[dict] | None = None,
     wall_penalty_px: float = 0.0,
     init: np.ndarray | None = None,
+    f_scale_px: float | None = None,
 ) -> dict | None:
-    """Robust weighted nonlinear least-squares trilateration.
-
-    - Weights each residual by 1 / sigma_px so noisy/distant receivers
-      contribute less.
-    - Uses a soft-L1 loss to suppress remaining outliers (multipath spikes).
-    - Adds wall_penalty_px per wall crossed along the line of sight.
-
-    Returns None when fewer than 3 samples are supplied or the solver
-    diverges. Otherwise returns a dict with the fitted position and a set
-    of quality metrics.
-    """
+    """Robust weighted nonlinear least-squares trilateration."""
     if len(samples) < 3:
         return None
 
-    segs = _wall_segments(walls)
+    walls_arr = _walls_to_array(walls)
     penalty = max(0.0, float(wall_penalty_px))
 
     xs = np.array([s.x for s in samples], dtype=float)
@@ -223,19 +282,21 @@ def trilaterate_robust(
         dx = xs - p[0]
         dy = ys - p[1]
         line = np.sqrt(dx * dx + dy * dy)
-        if segs and penalty > 0:
-            extra = np.empty(len(samples))
-            for i in range(len(samples)):
-                path = LineString([(p[0], p[1]), (xs[i], ys[i])])
-                extra[i] = _wall_crossings(path, segs)
-            line = line + extra * penalty
+        if walls_arr.size and penalty > 0:
+            crossings = _count_crossings_vec(
+                float(p[0]), float(p[1]), xs, ys, walls_arr
+            )
+            line = line + crossings * penalty
         return weights * (line - rs)
 
     p0 = init if init is not None else initial_guess_centroid(xs, ys, rs)
-    # f_scale is the residual magnitude considered "normal noise". Set it
-    # to roughly the median per-link noise so soft_l1 compresses anything
-    # several sigmas above the noise floor.
-    f_scale = max(2.0, float(np.median(sig)))
+    # f_scale is the residual magnitude considered "normal noise". When the
+    # caller knows the floor scale (px/m) it should pass `f_scale_px` so
+    # this stays meaningful across very dense and very sparse maps.
+    if f_scale_px is not None and f_scale_px > 0:
+        f_scale = float(f_scale_px)
+    else:
+        f_scale = max(2.0, float(np.median(sig)))
     try:
         result = least_squares(
             residuals, p0, loss="soft_l1", f_scale=f_scale, max_nfev=80,
@@ -246,8 +307,7 @@ def trilaterate_robust(
 
     # Second pass: drop the worst residual if it's an obvious outlier
     # (multipath spike). Refit on the cleaned set when we still have ≥3
-    # samples. This is the classic "RANSAC-lite" trick that works well
-    # with weighted nonlinear least squares.
+    # samples.
     raw_residuals = result.fun / weights
     if len(samples) >= 4:
         worst = int(np.argmax(np.abs(raw_residuals)))
@@ -262,12 +322,11 @@ def trilaterate_robust(
             def residuals2(p: np.ndarray) -> np.ndarray:
                 dx = xs2 - p[0]; dy = ys2 - p[1]
                 line = np.sqrt(dx * dx + dy * dy)
-                if segs and penalty > 0:
-                    extra = np.empty(len(xs2))
-                    for i in range(len(xs2)):
-                        path = LineString([(p[0], p[1]), (xs2[i], ys2[i])])
-                        extra[i] = _wall_crossings(path, segs)
-                    line = line + extra * penalty
+                if walls_arr.size and penalty > 0:
+                    crossings = _count_crossings_vec(
+                        float(p[0]), float(p[1]), xs2, ys2, walls_arr
+                    )
+                    line = line + crossings * penalty
                 return w2 * (line - rs2)
 
             try:
@@ -312,17 +371,17 @@ def trilaterate_robust(
 # ---------------------------------------------------------------------------
 
 class PositionKalman:
-    """2D constant-velocity Kalman filter.
+    """2D constant-velocity Kalman filter."""
 
-    State: [x, y, vx, vy].  Measurement noise R is derived from HDOP × the
-    trilateration residual scale, so the filter automatically tightens when
-    geometry is good and loosens when it's bad.
-    """
-
-    def __init__(self, process_noise: float = 4.0) -> None:
+    def __init__(
+        self,
+        process_noise: float = 4.0,
+        reset_after_seconds: float = 30.0,
+    ) -> None:
         self.x: np.ndarray | None = None
         self.P: np.ndarray = np.eye(4) * 1e3
         self.q = float(process_noise)
+        self.reset_after = float(reset_after_seconds)
         self._last_t: float | None = None
 
     def reset(self, xy: np.ndarray, t: float) -> None:
@@ -339,7 +398,7 @@ class PositionKalman:
         # Re-seed when the target reappears after a long absence — the
         # constant-velocity prior is no longer valid and would drag the
         # smoothed position towards a stale extrapolation.
-        if dt > 30.0:
+        if dt > self.reset_after:
             self.reset(xy, t)
             return self.x[:2].copy()
         self._last_t = float(t)
@@ -401,12 +460,37 @@ class PositionKalman:
 # ---------------------------------------------------------------------------
 
 class StationarityDetector:
-    """Returns the centroid + duration when the target has been still long enough."""
+    """Returns the centroid + duration when the target has been still long enough.
 
-    def __init__(self, window_seconds: float = 12.0, max_jitter_px: float = 8.0) -> None:
+    Jitter threshold is expressed in METERS via ``max_jitter_m`` so the
+    detector behaves the same on dense maps (100 px/m) and sparse maps
+    (1 px/m). The legacy ``max_jitter_px`` argument is still accepted for
+    callers that want to override the px figure directly.
+    """
+
+    def __init__(
+        self,
+        window_seconds: float = 12.0,
+        max_jitter_m: float = 0.4,
+        scale_px_per_m: float = 1.0,
+        max_jitter_px: float | None = None,
+    ) -> None:
         self.window = float(window_seconds)
-        self.max_jitter = float(max_jitter_px)
+        self.scale = max(1e-6, float(scale_px_per_m))
+        self.max_jitter_m = float(max_jitter_m)
+        if max_jitter_px is not None:
+            self.max_jitter = float(max_jitter_px)
+        else:
+            self.max_jitter = self.max_jitter_m * self.scale
         self._buffer: list[tuple[float, float, float]] = []  # (t, x, y)
+
+    def update_scale(self, scale_px_per_m: float) -> None:
+        new_scale = max(1e-6, float(scale_px_per_m))
+        if abs(new_scale - self.scale) < 1e-6:
+            return
+        self.scale = new_scale
+        self.max_jitter = self.max_jitter_m * self.scale
+        self._buffer.clear()
 
     def push(self, t: float, x: float, y: float) -> tuple[float, float, float] | None:
         self._buffer.append((float(t), float(x), float(y)))
@@ -430,10 +514,9 @@ class StationarityDetector:
 class AutoCalibrator:
     """Per-(target, receiver) opportunistic linear calibrator.
 
-    When the target is detected as stationary at position P, the true
-    distance to a receiver R is |P - R|. Pair this with the raw distance
-    reported by that receiver to build training samples. After enough
-    samples, fit `true = factor * raw + offset` by weighted least squares.
+    Sample weighting down-weights very-far samples (more multipath, less
+    informative). Clamps shared with the JS panel via the module-level
+    CAL_* constants so a fit accepted in the UI is also accepted here.
     """
 
     def __init__(self, max_samples: int = 40, min_samples: int = 5) -> None:
@@ -466,10 +549,9 @@ class AutoCalibrator:
         except np.linalg.LinAlgError:
             return None
         factor, offset = float(sol[0]), float(sol[1])
-        # Reject pathological fits to avoid corrupting good calibrations.
-        if not (0.2 <= factor <= 5.0):
+        if not (CAL_FACTOR_MIN <= factor <= CAL_FACTOR_MAX):
             return None
-        if not (-5.0 <= offset <= 5.0):
+        if not (CAL_OFFSET_MIN <= offset <= CAL_OFFSET_MAX):
             return None
         pred = factor * raw + offset
         rmse = float(np.sqrt(np.mean((pred - true) ** 2)))

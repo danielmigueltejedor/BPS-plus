@@ -140,6 +140,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 15s session at one mapped position. One entry per receiver per position.
     const proSamplesByReceiver = {};
     const proPositionsLog = []; // [{floor, x, y, captured: Set<receiverId>}]
+    // Last N positions reported for the tracked device, for an on-map
+    // trail. Cleared on map switch / stop.
+    const positionTrail = [];
+    const POSITION_TRAIL_MAX = 30;
     let proPickPositionPending = false;
     // Live BT proxy list, fetched from /api/bps/scanners. Used to fill
     // the receiver-placement dropdown so users pick a real proxy by
@@ -273,6 +277,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     
         await loadFrontendConfig();
         await fetchAvailableScanners();
+        // Refresh proxy list every 30 s so renames in HA propagate without
+        // a panel reload.
+        setInterval(() => { fetchAvailableScanners().catch(() => {}); }, 30000);
+        // Live RSSI tile is only useful while the user is in calibration
+        // mode (entity selected). Poll lightly.
+        setInterval(refreshLiveRssi, 4000);
 
         // Once the maps are loaded, call fetchBPSData
         let tmpsaved = await getSavedMaps();
@@ -392,10 +402,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                         await updateEntArray(message.entity_id, message.new_state);
                         socketIdCounter++;
                         const triData = NewEnts.map(item => item.cords);
+                        const fl = getCurrentFloor();
+                        const scale = fl ? Number(fl.scale) || 1 : 1;
+                        const walls = (fl && Array.isArray(fl.walls)) ? fl.walls : [];
+                        const wallPenaltyM = fl ? (Number(fl.wall_penalty) || 0) : 0;
                         socket.send(JSON.stringify({
                             id: socketIdCounter,
                             type: "bps/known_points",
                             knownPoints: triData,
+                            scalePxPerM: scale,
+                            walls,
+                            wallPenaltyM,
                         }));
                     }
 
@@ -455,6 +472,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             stoptrackstat = false;
             starttrackbtn.style.display = "none";
             stoptrackbtn.style.display = "";
+            positionTrail.length = 0;
+            const trackingQuality = document.getElementById("trackingQuality");
+            const trackingQualityLine = document.getElementById("trackingQualityLine");
+            if (trackingQuality) trackingQuality.style.display = "";
             const interval = setInterval(async () => {
                 if (stoptrackstat) {
                     clearInterval(interval);
@@ -462,6 +483,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     starttrackbtn.style.display = "";
                     stoptrackbtn.style.display = "none";
                     zonediv.style.display = "none";
+                    if (trackingQuality) trackingQuality.style.display = "none";
                     return;
                 }
                 let apiresponse = await fetchBPSCords();
@@ -476,6 +498,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                 drawTracker(dt);
                 zonediv.style.display = "";
                 document.getElementById("zonevalue").textContent = result.zone;
+                if (trackingQualityLine) {
+                    const q = result.quality || {};
+                    const label = q.label || "?";
+                    const hdop = Number.isFinite(q.hdop) ? q.hdop.toFixed(2) : "—";
+                    const n = Number.isFinite(q.n_used) ? q.n_used : "—";
+                    const stat = q.stationary ? "·  parado" : "·  en mov.";
+                    trackingQualityLine.textContent =
+                        `${label.toUpperCase()}  ·  HDOP ${hdop}  ·  ${n} proxies  ${stat}`;
+                }
             }, 500); // Run every half second
         }
 
@@ -553,15 +584,40 @@ document.addEventListener('DOMContentLoaded', async () => {
             urlBol = true;
         }
         clearCanvas();
-        
-        const iconSize = canvas.width * 0.04; // Adjust size as needed
-        const x = tricords.x;
-        const y = tricords.y;
+
+        const x = Number(tricords.x);
+        const y = Number(tricords.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+        positionTrail.push({ x, y });
+        if (positionTrail.length > POSITION_TRAIL_MAX) positionTrail.shift();
+
+        // Trail behind the icon.
+        if (positionTrail.length > 1) {
+            ctx.save();
+            ctx.strokeStyle = "rgba(239,68,68,0.7)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            positionTrail.forEach((p, i) => {
+                if (i === 0) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            });
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        const iconSize = canvas.width * 0.04;
         const icon = new Image();
         icon.src = "person.svg";
         icon.onload = () => {
             ctx.drawImage(icon, x - iconSize / 2, y - iconSize / 2, iconSize, iconSize);
         };
+        ctx.save();
+        ctx.fillStyle = "rgba(59,130,246,0.85)";
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(6, iconSize / 4), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
     }
 
     // =================================================================
@@ -730,10 +786,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function getCalibratedDistance(rawDistance, receiver) {
         const calibration = ensureReceiverCalibration(receiver);
-        const factor = parseFloat(calibration.factor ?? 1);
-        const offset = parseFloat(calibration.offset ?? 0);
-        const corrected = (rawDistance * factor) + offset;
-        return Math.max(corrected, 0);
+        const raw = Number(rawDistance);
+        if (!Number.isFinite(raw) || raw < 0) return 0;
+        let factor = parseFloat(calibration.factor);
+        let offset = parseFloat(calibration.offset);
+        if (!Number.isFinite(factor) || factor <= 0) factor = 1;
+        if (!Number.isFinite(offset)) offset = 0;
+        const corrected = (raw * factor) + offset;
+        return Number.isFinite(corrected) ? Math.max(corrected, 0) : 0;
     }
 
     function refreshCalibrationStatus() {
@@ -879,8 +939,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         //  Output is clamped to plausible BLE ranges to avoid pathological fits.
         if (!samples || samples.length === 0) return null;
 
+        // Must match Python clamps in positioning.CAL_* so a fit accepted
+        // here is also accepted by the engine's AutoCalibrator.
         const FACTOR_MIN = 0.2, FACTOR_MAX = 5.0;
-        const OFFSET_MIN = -10, OFFSET_MAX = 10;
+        const OFFSET_MIN = -10.0, OFFSET_MAX = 10.0;
         const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
         let factor = 1, offset = 0;
@@ -961,6 +1023,53 @@ document.addEventListener('DOMContentLoaded', async () => {
         calProCoverage.style.whiteSpace = "pre-line";
     }
 
+    async function refreshLiveRssi() {
+        const el = document.getElementById("liveRssi");
+        const body = document.getElementById("liveRssiBody");
+        if (!el || !body) return;
+        const deviceId = (calEntitySelect && calEntitySelect.value) || "";
+        const floor = (typeof getCurrentFloor === "function") ? getCurrentFloor() : null;
+        if (!deviceId || !floor || !Array.isArray(floor.receivers) || floor.receivers.length === 0) {
+            el.style.display = "none";
+            return;
+        }
+        try {
+            const r = await fetch("/api/bps/ble_snapshot");
+            if (!r.ok) {
+                el.style.display = "none";
+                return;
+            }
+            const snap = await r.json();
+            const links = Array.isArray(snap && snap.links) ? snap.links : [];
+            // Build a quick lookup by scanner source MAC slug + by friendly slug
+            // so we match whatever entity_id the receiver has.
+            const lines = floor.receivers.map(rec => {
+                const display = getReceiverDisplayName(rec);
+                const slug = String(rec.entity_id || "").toLowerCase();
+                const matches = links.filter(l =>
+                    l.device && l.scanner &&
+                    deviceId.toLowerCase().includes(String(l.device).replace(/:/g, "_").toLowerCase()) === false
+                        ? false
+                        : false
+                );
+                // Fallback: match scanner source slug
+                const matched = links.find(l => {
+                    if (!l.scanner) return false;
+                    const sslug = String(l.scanner).replace(/:/g, "_").toLowerCase();
+                    return sslug === slug || sslug.endsWith(slug);
+                });
+                if (!matched) return `· ${display}: sin enlace`;
+                const rssi = Number.isFinite(matched.rssi) ? `${matched.rssi.toFixed(0)} dBm` : "—";
+                const dist = Number.isFinite(matched.distance_m) ? `${matched.distance_m.toFixed(1)} m` : "—";
+                return `· ${display}: ${rssi}  →  ${dist}`;
+            });
+            body.textContent = lines.join("\n");
+            el.style.display = "";
+        } catch (_e) {
+            el.style.display = "none";
+        }
+    }
+
     function resetProCalibration() {
         Object.keys(proSamplesByReceiver).forEach(k => delete proSamplesByReceiver[k]);
         proPositionsLog.length = 0;
@@ -1017,7 +1126,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                             rawByReceiver[receiverId].push(observed);
                         }
                     } catch (err) {
-                        // Receiver/device pair has no readable value this tick.
+                        // Receiver/device pair has no readable value this
+                        // tick. Log a single warn per receiver per session
+                        // so the user sees WHY a receiver shows 0 samples
+                        // instead of guessing.
+                        if (!rawByReceiver[`__warned_${receiverId}`]) {
+                            rawByReceiver[`__warned_${receiverId}`] = true;
+                            console.warn(
+                                `Pro: lectura falla para receptor "${receiverId}":`,
+                                err && err.message ? err.message : err
+                            );
+                        }
                     }
                 })
             );
@@ -1070,6 +1189,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         updateProStatus(msg);
         refreshProCoverage();
+        // Repaint so the position marker stays visible after the capture run.
+        if (checkCanvasImage()) { clearCanvas(); drawElements(); }
     }
 
     function computeProCalibrationFromAccumulated() {
@@ -2129,14 +2250,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                     ctx.drawImage(icon, x - iconSize / 2, y - iconSize / 2, iconSize, iconSize);
                 };
 
-                // Show id for receiver
+                // Show friendly name (fallback to entity_id slug if not found in scanners list).
+                const displayName = getReceiverDisplayName(item);
                 ctx.font = "bold 25px Arial";
                 ctx.fillStyle = "black";
-                ctx.fillText(item.entity_id, x + iconSize / 2 + 5, y);
+                ctx.fillText(displayName, x + iconSize / 2 + 5, y);
                 if(item.entity_id){
                     const factorLabel = Number(item.calibration?.factor ?? 1).toFixed(2);
                     const offsetLabel = Number(item.calibration?.offset ?? 0).toFixed(2);
-                    const recLabel = `${item.entity_id} (x${factorLabel}, ${offsetLabel}m)`;
+                    const recLabel = `${displayName} (x${factorLabel}, ${offsetLabel}m)`;
                     tmpHTMLrec = tmpHTMLrec + newelement.replace("typename", recLabel).replace("removexxx", "removerec").replace("idxxx", item.entity_id).replace("idxxx", item.entity_id);
                 }
             }
@@ -2184,6 +2306,30 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
 
+        // Draw every Pro-captured position so the user can see the
+        // spatial coverage before computing calibration. Numbered for
+        // debugging; current marker drawn separately below.
+        if (Array.isArray(proPositionsLog) && proPositionsLog.length > 0) {
+            ctx.save();
+            ctx.fillStyle = "rgba(34,197,94,0.85)"; // emerald
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 2;
+            ctx.font = "bold 18px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            proPositionsLog.forEach((pt, idx) => {
+                if (pt.floor !== SelMapName) return;
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 14, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                ctx.fillStyle = "white";
+                ctx.fillText(String(idx + 1), pt.x, pt.y);
+                ctx.fillStyle = "rgba(34,197,94,0.85)";
+            });
+            ctx.restore();
+        }
+
         if (proCalibrationPoint && proCalibrationPoint.floor === SelMapName) {
             const markerSize = canvas.width * 0.035;
             const px = proCalibrationPoint.x;
@@ -2193,6 +2339,33 @@ document.addEventListener('DOMContentLoaded', async () => {
             icon.onload = () => {
                 ctx.drawImage(icon, px - markerSize / 2, py - markerSize / 2, markerSize, markerSize);
             };
+            // Fallback dot in case the SVG fails to load.
+            ctx.save();
+            ctx.fillStyle = "rgba(59,130,246,0.6)";
+            ctx.beginPath();
+            ctx.arc(px, py, Math.max(6, markerSize / 4), 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // Position trail (last N tracker hits).
+        if (Array.isArray(positionTrail) && positionTrail.length > 1) {
+            ctx.save();
+            ctx.strokeStyle = "rgba(239,68,68,0.7)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            positionTrail.forEach((p, i) => {
+                if (i === 0) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            });
+            ctx.stroke();
+            ctx.fillStyle = "rgba(239,68,68,0.7)";
+            positionTrail.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.restore();
         }
 
         if(tmpHTMLrec !== ""){

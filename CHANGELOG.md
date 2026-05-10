@@ -2,6 +2,99 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.0.0] - 2026-05-10
+### Cambios mayores: motor de posicionamiento robusto
+
+Auditoría completa del pipeline BLE → posición. Se reescriben las partes
+defectuosas del motor y se añade feedback visual en directo.
+
+#### Algoritmos (positioning.py / ble_scanner.py)
+- **EWMA con peso temporal** tanto en `DistanceSmoother` (distancias) como
+  en RSSI (`BleScanner._on_adv` / `refresh_from_scanners`). Antes una
+  ráfaga de 5 advs en 50 ms tras 5 s de silencio reescribía casi
+  totalmente la EWMA con datos casi-instantáneos. Ahora `alpha_eff` cae
+  conforme el inter-arrival baja por debajo de `tau` (1.5 s).
+- **Stationarity y `f_scale` parametrizados por escala** (m, no px).
+  Antes `max_jitter_px = 8` y `f_scale = 2 px` hardcoded: en mapas densos
+  el detector nunca disparaba (sin autocal); en mapas pobres siempre
+  disparaba (con calibración corrupta). Ahora `max_jitter_m = 0.4 m` y el
+  solver usa `~1 m × scale` como umbral de ruido normal.
+- **Wall raycast vectorizado en NumPy** (sin shapely por residual). El
+  solver evalúa residuals decenas de veces; cada vez se construían N
+  `LineString` Shapely. ~30× más rápido en plantas de 5 paredes / 6
+  receptores.
+- **Path-loss fit usa el RSSI del momento de la muestra**, no la EWMA. La
+  EWMA lag de varios segundos en advertisers escasos (iPhone con
+  pantalla apagada) sesgaba `tx_power, n` hacia advs viejos.
+- **Histéresis de planta**: el motor mantiene la planta activa salvo que
+  otra puntúe ≥1.20× mejor durante 3 ticks consecutivos. Mata el
+  parpadeo en bordes entre plantas que comparten proxies.
+- **Selección de planta por inverse-variance**: `Σ 1/σ²` en vez de
+  `(n_samples, -min_radius)`. Una planta con muchos receptores apretados
+  vence a otra con un único proxy muy cerca pero solitario.
+- **Persistencia de calibración a disco** (`bps_calibration.json`):
+  per-link `tx_power`, `path_loss` y muestras se serializan cada 30 s y
+  al apagar HA. Reinicio: importadas en arranque. Antes el sistema
+  "olvidaba" cada restart todas las horas de calibración acumulada.
+- **Clamps unificados Python ↔ JS**: `factor∈[0.2,5.0]`, `offset∈[-10,10]`.
+  Antes una calibración válida en panel podía ser rechazada por el motor.
+- **Kalman: umbral de reseed configurable** (`reset_after_seconds`,
+  default 30 s). Mismo comportamiento por defecto, parametrizable.
+
+#### Orquestación (__init__.py)
+- **Schema versioning + migrador automático** de `bpsdata.txt`. v1 → v2:
+  receptores con `entity_id` tipo `"Bluetooth Proxy Cocina"` (typed text)
+  ahora se slugifican a `bluetooth_proxy_cocina` con `display_name`
+  preservado. La causa del bug Pro "calibrados 0/6" — entity_ids con
+  espacios/acentos no resolvían en `/api/bps/distance`. Migración
+  idempotente, ejecuta en cada `update_global_data`.
+- **Discovery cacheada**: 5 s TTL. Antes corría cada tick (1 s) iterando
+  `hass.states.async_all()` (potencialmente miles).
+- **Prune ejecuta siempre cada 60 s**, también cuando no hay candidatos.
+  Antes la rama "sleep 5; continue" saltaba el prune → memoria crecía si
+  no había nadie trilaterable pero sí devices BLE pasajeros.
+- **Smoothers stale purgados** cuando un receptor se renombra o elimina.
+- **WebSocket fix de fuga de listeners**: `handle_subscribe` registraba
+  un nuevo `async_track_state_change_event` por llamada sin guardar el
+  unsub. Cada reconexión sumaba un listener; cada `state_changed`
+  disparaba N callbacks. Ahora una sesión por conexión, dispone limpio.
+- **`update_or_add_entry` preserva todas las claves** (`floor`,
+  `quality`, ...). Antes solo refrescaba `cords` y `zone`.
+- **WS `bps/known_points` acepta `scalePxPerM`, `walls`, `wallPenaltyM`**.
+  El sigma del solver ya no es 2 px hardcoded — se escala con la
+  densidad del mapa.
+- **`/api/bps/cords` con `Cache-Control: max-age=1`** para frontends que
+  hacen polling 500 ms.
+
+#### Frontend (script.js / index.html)
+- **NaN-guard en `getCalibratedDistance`**: si calibración es inválida,
+  trata factor=1 / offset=0 en vez de propagar NaN al solver.
+- **Pro: errores de captura visibles** (`console.warn` por receptor sin
+  señal, una vez por sesión). Antes silencioso → "0/6" sin pista.
+- **Multi-posición Pro: marcadores numerados visibles**. Verde con N=1,2,3
+  por cada captura aceptada. Permite verificar cobertura espacial antes
+  de calcular calibración.
+- **Trail de posición** (últimas 30 lecturas) en el mapa durante
+  tracking. Ayuda a debug visual de calidad.
+- **Badge "Calidad de seguimiento"** en panel: HDOP, nº proxies, label
+  (good/fair/poor), parado/movimiento.
+- **Panel "RSSI por receptor (vivo)"** poll cada 4 s desde
+  `/api/bps/ble_snapshot` mientras hay dispositivo seleccionado en
+  Calibración.
+- **Refresh periódico de proxies** (`fetchAvailableScanners` cada 30 s).
+  Renombrar un proxy en HA propaga sin recargar el panel.
+- **Friendly name en mapa y lista** (vía `getReceiverDisplayName`).
+- **Fallback dot** detrás de `person.svg` por si la SVG no carga.
+
+#### Migración / breaking
+- **Bump SemVer mayor por cambio de schema bpsdata.txt** (v1 → v2). El
+  migrador es transparente y se ejecuta en la primera lectura post-
+  upgrade. Las muestras de calibración path-loss persistidas en
+  `bps_calibration.json` son schema v1 (estable).
+- Si tenías receptores con friendly names como `entity_id` (legacy) la
+  migración los convierte a slug. Si tu mapa los referenciaba por slug
+  ya, no cambia nada.
+
 ## [1.8.6] - 2026-05-10
 ### Calibración Pro (multi-posición + mediana)
 - `frontend/script.js`: el flujo Pro deja de calibrar desde una única

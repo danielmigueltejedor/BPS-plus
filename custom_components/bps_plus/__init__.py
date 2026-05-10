@@ -25,7 +25,7 @@ from homeassistant.components.websocket_api import (
     websocket_command,
 )
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from shapely.geometry import Point, Polygon
 import voluptuous as vol
@@ -82,6 +82,22 @@ _BPS_DATA_KEY_STOP_LISTENERS = "stop_listeners"
 
 # Drop link/engine state idle for longer than this many seconds.
 ENGINE_PRUNE_AFTER = 30 * 60.0  # 30 min
+
+# Discovery cache: full BLE scan + state walk is O(n_states). Cache the
+# canonical map / entity options for this many seconds before re-running.
+DISCOVERY_CACHE_TTL = 5.0
+
+# Floor hysteresis: keep the current active floor unless the alternative
+# scores at least HYSTERESIS_RATIO better for HYSTERESIS_TICKS consecutive
+# ticks. Stops the engine from oscillating at floor boundaries.
+HYSTERESIS_RATIO = 1.20
+HYSTERESIS_TICKS = 3
+
+# Calibration persistence: where to dump per-link tx_power/n + samples so a
+# restart does not lose the path-loss fit accumulated over hours.
+CAL_FILE_NAME = "bps_calibration.json"
+# Throttle the disk write so we do not hammer the filesystem on every tick.
+CAL_PERSIST_MIN_INTERVAL = 30.0
 
 
 def cache_discovery_data(
@@ -410,6 +426,62 @@ def setup_file_watcher(file_path, update_callback, hass: HomeAssistant):
     return observer
 
 
+CURRENT_BPSDATA_SCHEMA = 2
+
+
+def migrate_bpsdata(data: dict) -> tuple[dict, bool]:
+    """Bring saved bpsdata.txt up to the current schema.
+
+    Returns ``(migrated_data, changed)``. The migrator runs on every
+    load: it is cheap and idempotent.
+
+    v1 → v2: receivers historically stored ``entity_id`` as the user-typed
+    text (often a friendly name with spaces and accents like
+    ``Bluetooth Proxy Cocina``). The engine resolves slugs only, so those
+    receivers were silently dropped from trilateration. Slugify the
+    ``entity_id`` here, keep the original under ``display_name`` so the
+    UI still shows the readable string. Receivers without ``calibration``
+    are filled with the unit calibration (``factor=1, offset=0``).
+    """
+    if not isinstance(data, dict):
+        return data, False
+    changed = False
+
+    schema = data.get("schema_version")
+    floors = data.get("floor")
+    if not isinstance(floors, list):
+        return data, False
+
+    def _slug(value: str) -> str:
+        s = str(value or "").strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+        return s
+
+    for floor in floors:
+        if not isinstance(floor, dict):
+            continue
+        receivers = floor.get("receivers")
+        if not isinstance(receivers, list):
+            continue
+        for r in receivers:
+            if not isinstance(r, dict):
+                continue
+            eid = r.get("entity_id", "")
+            slug = _slug(eid)
+            if slug and slug != eid:
+                r.setdefault("display_name", eid)
+                r["entity_id"] = slug
+                changed = True
+            if "calibration" not in r or not isinstance(r.get("calibration"), dict):
+                r["calibration"] = {"factor": 1, "offset": 0}
+                changed = True
+
+    if schema != CURRENT_BPSDATA_SCHEMA:
+        data["schema_version"] = CURRENT_BPSDATA_SCHEMA
+        changed = True
+    return data, changed
+
+
 async def update_global_data(file_path):
     """Update global_data with the contents of the file"""
     global global_data
@@ -418,8 +490,19 @@ async def update_global_data(file_path):
         global_data = []
         return
     try:
-        global_data = json.loads(new_data)
-        _LOGGER.debug("Updated global_data from %s", file_path)
+        parsed = json.loads(new_data)
+        migrated, changed = migrate_bpsdata(parsed) if isinstance(parsed, dict) else (parsed, False)
+        global_data = migrated
+        _LOGGER.debug("Updated global_data from %s (migrated=%s)", file_path, changed)
+        if changed:
+            try:
+                tmp = file_path + ".tmp"
+                async with aiofiles.open(tmp, "w") as fh:
+                    await fh.write(json.dumps(migrated))
+                os.replace(tmp, file_path)
+                _LOGGER.info("Migrated bpsdata.txt to schema v%s", CURRENT_BPSDATA_SCHEMA)
+            except Exception as err:
+                _LOGGER.warning("Could not write migrated bpsdata: %s", err)
     except json.JSONDecodeError as e:
         # File watcher fires on partial writes too; tolerate transient
         # corruption — the next write will trigger another read.
@@ -433,6 +516,9 @@ async def update_tracked_entities(hass, _unused=None):
     """Drive the positioning loop using the native BLE scanner."""
     global tracked_entities, new_global_data, secToUpdate
     last_prune = time.monotonic()
+    last_discovery = 0.0
+    last_persist = 0.0
+    cached_discovery: tuple | None = None
     while True:
         try:
             scanner = get_scanner(hass)
@@ -445,29 +531,44 @@ async def update_tracked_entities(hass, _unused=None):
                 continue
 
             now_mono = time.monotonic()
+            # Prune every 60 s independently of whether we have candidates,
+            # otherwise transient devices accumulate forever when nobody is
+            # currently trilaterable.
             if now_mono - last_prune > 60.0:
                 _prune_engine_state(scanner, now_mono)
                 last_prune = now_mono
 
             # Pull per-scanner RSSI for every known device. HA's adv
-            # callback dedupes, so without this we only ever see 1-2
+            # callback dedupes; without this we only ever see 1-2
             # proxies per device and `candidate_targets(min=3)` is
-            # always empty — same root cause Bermuda sidesteps by
-            # querying scanner_devices_by_address directly.
+            # always empty.
             scanner.seed_from_discovered()
             scanner.refresh_from_scanners()
 
-            # Discovery + alias setup MUST run every tick before checking
-            # candidates. Otherwise rotating-MAC devices (Apple Watch,
-            # iPhones via private_ble_device) never get aliased to a
-            # stable identity, their advertisements stay scattered across
-            # short-lived MACs and they never accumulate >=3 scanner
-            # sightings — chicken-and-egg.
-            canonical_map, entity_options, target_metadata = discover_distance_entities(hass)
-            cache_discovery_data(hass, canonical_map, entity_options, target_metadata)
+            # Discovery is expensive (state walk + scanner inspection).
+            # Cache for DISCOVERY_CACHE_TTL seconds; force-refresh when
+            # we have no candidates yet.
+            need_refresh = (
+                cached_discovery is None
+                or (now_mono - last_discovery) > DISCOVERY_CACHE_TTL
+            )
+            if need_refresh:
+                cached_discovery = discover_distance_entities(hass)
+                cache_discovery_data(hass, *cached_discovery)
+                last_discovery = now_mono
+            canonical_map, entity_options, target_metadata = cached_discovery
 
             candidates = scanner.candidate_targets(min_scanners=3)
             tracked_entities = candidates
+
+            # Persist BLE calibration periodically so a HA restart does
+            # not lose hours of accumulated path-loss fits.
+            if now_mono - last_persist > CAL_PERSIST_MIN_INTERVAL:
+                try:
+                    await _persist_calibration(hass, scanner)
+                except Exception as err:  # pragma: no cover - defensive
+                    _LOGGER.debug("Calibration persistence failed: %s", err)
+                last_persist = now_mono
 
             if len(candidates) < 1:
                 _LOGGER.debug(
@@ -557,6 +658,8 @@ def _get_engine_state(entity: str) -> dict:
     if state is None:
         state = {
             "smoothers": {},          # smoother_key -> DistanceSmoother
+            "active_floor": None,
+            "floor_switch_ticks": 0,
             "kalman": PositionKalman(),
             "stationary": StationarityDetector(),
             "autocal": {},            # receiver_id -> AutoCalibrator
@@ -587,6 +690,8 @@ def _build_floor_buckets(hass, eids, engine):
     smoothers = engine["smoothers"]
     receiver_sources: dict[str, str] = engine.setdefault("receiver_sources", {})
     buckets: dict[str, dict] = {}
+    now_mono = time.monotonic()
+    seen_smoother_keys: set[str] = set()
 
     for floor in eids["data"].get("floor", []):
         scale_raw = floor.get("scale")
@@ -636,12 +741,14 @@ def _build_floor_buckets(hass, eids, engine):
             corrected_m = apply_calibration(raw_m, receiver.get("calibration"))
             smoother_key = f"{floor_name}::{receiver_id}"
             smoother = smoothers.setdefault(smoother_key, DistanceSmoother())
-            smoothed_m, sigma_m, _accepted = smoother.push(corrected_m)
+            seen_smoother_keys.add(smoother_key)
+            smoothed_m, sigma_m, _accepted = smoother.push(corrected_m, t=now_mono)
             if smoothed_m is None or smoothed_m <= 0:
                 continue
 
             radius_px = smoothed_m * scale
-            sigma_px = max(2.0, sigma_m * scale)
+            # Sigma floor scales with map density: ~5 cm in real space.
+            sigma_px = max(0.05 * scale, sigma_m * scale)
             samples.append(
                 DistanceSample(
                     receiver_id=receiver_id,
@@ -666,28 +773,71 @@ def _build_floor_buckets(hass, eids, engine):
                 "target_identity": target_identity,
             }
 
+    # Drop smoother state for receiver/floor combos that no longer appear
+    # in the saved map (renamed planta, removed receiver, ...).
+    if seen_smoother_keys and smoothers:
+        for stale_key in [k for k in list(smoothers) if k not in seen_smoother_keys]:
+            smoothers.pop(stale_key, None)
+
     return buckets
 
 
-def _select_active_floor(buckets: dict[str, dict]) -> str | None:
-    """Pick the floor most likely hosting the target.
+def _floor_score(bucket: dict) -> float:
+    """Inverse-variance weighted score per floor.
 
-    Score = (sample count, -min_radius_px). More receivers seeing the
-    target trumps a single very-close one — useful when two floors
-    share a few proxies and one is genuinely populated.
+    Each receiver's contribution is `1 / sigma_px²` so a floor with many
+    tight readings outscores one with a single very-close (but lonely)
+    proxy. Samples on the active floor add up; sparse floors fall behind.
     """
-    best_name = None
-    best_key: tuple[int, float] = (-1, float("inf"))
-    for name, bucket in buckets.items():
-        samples = bucket["samples"]
-        if not samples:
-            continue
-        min_r = min(s.radius_px for s in samples)
-        key = (len(samples), -min_r)
-        if key > best_key:
-            best_key = key
-            best_name = name
-    return best_name
+    score = 0.0
+    for s in bucket["samples"]:
+        sigma = max(1.0, float(s.sigma_px))
+        score += 1.0 / (sigma * sigma)
+    return score
+
+
+def _select_active_floor(
+    buckets: dict[str, dict],
+    engine: dict,
+) -> str | None:
+    """Pick the floor most likely hosting the target with hysteresis.
+
+    Computes inverse-variance scores per floor. Switches floor only when
+    the candidate beats the current floor by `HYSTERESIS_RATIO` for
+    `HYSTERESIS_TICKS` consecutive ticks. Prevents flapping at
+    boundaries when both floors share proxies.
+    """
+    if not buckets:
+        return None
+
+    scores = {name: _floor_score(bucket) for name, bucket in buckets.items()}
+    if not any(scores.values()):
+        return None
+
+    best_name = max(scores, key=lambda n: scores[n])
+
+    current = engine.get("active_floor")
+    if current is None or current not in buckets:
+        engine["active_floor"] = best_name
+        engine["floor_switch_ticks"] = 0
+        return best_name
+
+    if best_name == current:
+        engine["floor_switch_ticks"] = 0
+        return current
+
+    current_score = scores.get(current, 0.0) or 1e-9
+    if scores[best_name] / current_score < HYSTERESIS_RATIO:
+        engine["floor_switch_ticks"] = 0
+        return current
+
+    ticks = engine.get("floor_switch_ticks", 0) + 1
+    engine["floor_switch_ticks"] = ticks
+    if ticks >= HYSTERESIS_TICKS:
+        engine["active_floor"] = best_name
+        engine["floor_switch_ticks"] = 0
+        return best_name
+    return current
 
 
 def _hdop_to_quality(hdop: float) -> str:
@@ -709,7 +859,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
     if not buckets:
         return
 
-    floor_name = _select_active_floor(buckets)
+    floor_name = _select_active_floor(buckets, engine)
     if floor_name is None:
         return
     bucket = buckets[floor_name]
@@ -717,10 +867,16 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
     if len(samples) < 3:
         return
 
+    # Solver f_scale matches "1 m of noise" in the floor's pixel space so
+    # soft-L1 outlier compression is meaningful regardless of map density.
+    scale = bucket.get("scale") or 1.0
+    f_scale_px = max(2.0, float(scale))
+
     fit = trilaterate_robust(
         samples,
         walls=bucket["walls"],
         wall_penalty_px=bucket["wall_penalty_px"],
+        f_scale_px=f_scale_px,
     )
     if fit is None or not fit["converged"]:
         return
@@ -739,6 +895,10 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
     #      log-distance distance estimate.
     #   2. Per-link RSSI path-loss fit (tx_power, n) inside the BLE scanner
     #      itself — the *root* of the distance estimate.
+    # Re-scale the stationarity detector when the active floor's scale
+    # changes (e.g. user re-calibrates the map). max_jitter is in METERS
+    # so behaviour stays identical across dense and sparse maps.
+    engine["stationary"].update_scale(scale)
     stationary = engine["stationary"].push(now, avg_x, avg_y)
     if stationary is not None:
         cx, cy, _dur = stationary
@@ -803,13 +963,16 @@ async def update_trilateration_and_zone(hass, new_global_data, entity, eids):
 
 
 def update_or_add_entry(data, new_entry):
-    for item in data:
-        if item["ent"] == new_entry["ent"]:  # Check if "ent" already exists
-            item["cords"] = new_entry["cords"]  # Update "cords"
-            item["zone"] = new_entry["zone"]  # Update "zone"
-            return data
+    """Upsert by `ent`, preserving every key the caller sent.
 
-    # If "ent" was not found, add as new post
+    The previous version only refreshed `cords` and `zone`, leaving
+    `floor` and `quality` frozen at their first value — wrong as soon as
+    the target moved between floors or HDOP changed.
+    """
+    for item in data:
+        if item.get("ent") == new_entry.get("ent"):
+            item.update(new_entry)
+            return data
     data.append(new_entry)
     return data
 
@@ -871,6 +1034,56 @@ def find_zone_for_point(data, entity, floor_name, point):
         buffer_candidates.sort()
         return buffer_candidates[0][1]
     return "unknown"
+
+
+def _calibration_path(hass: HomeAssistant) -> str:
+    return os.path.join(hass.config.path(), "www", "bps_maps", CAL_FILE_NAME)
+
+
+async def _persist_calibration(hass: HomeAssistant, scanner) -> None:
+    """Atomically dump per-link path-loss + samples to disk.
+
+    Writes to a sibling .tmp and renames on success so a crash mid-write
+    cannot corrupt the calibration file.
+    """
+    if scanner is None:
+        return
+    try:
+        payload = scanner.export_calibration()
+    except Exception as err:
+        _LOGGER.debug("export_calibration failed: %s", err)
+        return
+    if not payload.get("links") and not payload.get("aliases"):
+        return
+    target = _calibration_path(hass)
+    tmp = f"{target}.tmp"
+    try:
+        async with aiofiles.open(tmp, "w") as fh:
+            await fh.write(json.dumps(payload))
+        os.replace(tmp, target)
+    except Exception as err:
+        _LOGGER.debug("Failed to persist BLE calibration: %s", err)
+
+
+async def _restore_calibration(hass: HomeAssistant, scanner) -> int:
+    """Load previously-persisted calibration. Returns links restored."""
+    if scanner is None:
+        return 0
+    target = _calibration_path(hass)
+    try:
+        if not os.path.exists(target):
+            return 0
+        async with aiofiles.open(target, "r") as fh:
+            raw = await fh.read()
+        payload = json.loads(raw or "{}")
+    except Exception as err:
+        _LOGGER.warning("Could not load %s: %s", target, err)
+        return 0
+    try:
+        return scanner.import_calibration(payload)
+    except Exception as err:
+        _LOGGER.warning("import_calibration rejected payload: %s", err)
+        return 0
 
 
 def _ensure_panel(hass: HomeAssistant) -> None:
@@ -972,6 +1185,12 @@ async def _async_finish_init(hass: HomeAssistant) -> None:
                 "integration is loaded."
             )
         hass.data[DOMAIN]["scanner"] = scanner
+        # Restore the per-link path-loss fits the previous run learned —
+        # otherwise the engine starts from defaults every restart and the
+        # user's earlier calibration work is wasted.
+        restored = await _restore_calibration(hass, scanner)
+        if restored:
+            _LOGGER.info("Restored BLE calibration for %s links", restored)
 
     bucket = hass.data[DOMAIN].setdefault(_BPS_DATA_KEY_TASKS, [])
     positioning_task = hass.async_create_background_task(
@@ -986,8 +1205,14 @@ async def _async_finish_init(hass: HomeAssistant) -> None:
         _BPS_DATA_KEY_STOP_LISTENERS, {}
     )
     if "scanner" not in stop_listeners:
+        async def _on_stop(_event):
+            try:
+                await _persist_calibration(hass, scanner)
+            except Exception as err:  # pragma: no cover - defensive
+                _LOGGER.debug("Final calibration flush failed: %s", err)
+            scanner.stop()
         stop_listeners["scanner"] = hass.bus.async_listen_once(
-            "homeassistant_stop", lambda _e: scanner.stop()
+            "homeassistant_stop", _on_stop,
         )
     if observer is not None and "observer" not in stop_listeners:
         stop_listeners["observer"] = hass.bus.async_listen_once(
@@ -1489,193 +1714,167 @@ class BPSDiagnosticsAPI(HomeAssistantView):
 
 
 class BPSCordsAPI(HomeAssistantView):
-    """API för att skicka tillbaka apitricords"""
+    """Return latest computed positions (apitricords).
+
+    Adds a short ``Cache-Control: max-age=1`` header so panels that poll
+    aggressively (every 500 ms) don't hammer the integration. The
+    underlying value updates at most once per ``secToUpdate`` seconds
+    anyway, so caching for 1 s is harmless.
+    """
 
     url = "/api/bps/cords"
     name = "api:bps:cords"
     requires_auth = True
 
     def __init__(self, hass: HomeAssistant):
-        """Spara referens till hass"""
         self.hass = hass
 
     async def get(self, request):
-        """Returnera apitricords från hass.data"""
         apitricords_local = self.hass.data.get(DOMAIN, {}).get(
-            "apitricords", {}
+            "apitricords", []
         )
-
         if not apitricords_local:
-            return web.json_response(
-                {"error": "No data available"}, status=404
-            )
-
-        return web.json_response(apitricords_local)
+            return web.json_response({"error": "No data available"}, status=404)
+        resp = web.json_response(apitricords_local)
+        resp.headers["Cache-Control"] = "max-age=1"
+        return resp
 
 
 class BPSEntityWebSocket:
     def __init__(self, hass: HomeAssistant):
         self.hass = hass
-        self.tracked_entities = {}
-        self.connections = []
+        # connection -> {"entities": set[str], "unsub": callable | None}
+        self._sessions: dict[ActiveConnection, dict] = {}
+
+    def _drop_session(self, connection: ActiveConnection) -> None:
+        sess = self._sessions.pop(connection, None)
+        if not sess:
+            return
+        unsub = sess.get("unsub")
+        if callable(unsub):
+            try:
+                unsub()
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     async def handle_subscribe(
         self, hass: HomeAssistant, connection: ActiveConnection, msg: dict
     ):
-        """Managing subscription for entities"""
-        _LOGGER.debug(f"Received subscription request: {msg}")
-        entity_ids = msg["entities"]
+        """Subscribe a WS client to state updates for one or more entities.
+
+        Stores the unsub callback returned by ``async_track_state_change_event``
+        and disposes it on unsubscribe / disconnect. The previous version
+        registered a fresh listener each call without ever unsubscribing,
+        leaking N listeners after N reconnects — every state change then
+        fired N callbacks (CPU grew linearly with session count).
+        """
+        _LOGGER.debug("WS subscribe: %s", msg)
+        entity_ids = msg.get("entities") or []
         if not entity_ids:
-            connection.send_message(
-                {
-                    "id": msg["id"],
-                    "type": "result",
-                    "success": False,
-                    "error": {
-                        "code": "invalid_request",
-                        "message": "No entities provided.",
-                    },
-                }
-            )
+            connection.send_message({
+                "id": msg["id"], "type": "result", "success": False,
+                "error": {"code": "invalid_request", "message": "No entities provided."},
+            })
             return
 
-        # Add connection to subscribed entities
-        self.connections.append(connection)
-        for entity_id in entity_ids:
-            if entity_id not in self.tracked_entities:
-                self.tracked_entities[entity_id] = []
-            self.tracked_entities[entity_id].append(connection)
+        # Replace any prior subscription on this connection — clients
+        # routinely re-subscribe with a different entity set when the
+        # tracked target changes; without this we accumulate listeners.
+        self._drop_session(connection)
 
-        # Send the current state for all subscribed entities
+        @callback
+        def _on_state(event):
+            data = event.data
+            new_state = data.get("new_state")
+            connection.send_message({
+                "type": "state_changed",
+                "entity_id": data.get("entity_id"),
+                "new_state": new_state.state if new_state else None,
+            })
+
+        unsub = async_track_state_change_event(hass, entity_ids, _on_state)
+        self._sessions[connection] = {
+            "entities": set(entity_ids),
+            "unsub": unsub,
+        }
+
         current_states = []
         for entity_id in entity_ids:
             state = hass.states.get(entity_id)
             if state:
-                current_states.append(
-                    {
-                        "entity_id": entity_id,
-                        "state": state.state,
-                        "attributes": state.attributes,
-                    }
-                )
+                current_states.append({
+                    "entity_id": entity_id,
+                    "state": state.state,
+                    "attributes": dict(state.attributes),
+                })
 
-        connection.send_message(
-            {
-                "id": msg["id"],
-                "type": "result",
-                "success": True,
-                "message": f"Subscribed to entities: {entity_ids}",
-                "current_states": current_states,
-            }
-        )
-
-        # Listen for state_change
-        async_track_state_change_event(
-            hass, entity_ids, self.state_change_listener
-        )
+        connection.send_message({
+            "id": msg["id"], "type": "result", "success": True,
+            "message": f"Subscribed to entities: {entity_ids}",
+            "current_states": current_states,
+        })
 
     async def handle_unsubscribe(
         self, hass: HomeAssistant, connection: ActiveConnection, msg: dict
     ):
-        """Managing unsubscription"""
-        _LOGGER.debug(f"Received unsubscribe request: {msg}")
-        entity_ids = msg.get("entities", [])
-        for entity_id in entity_ids:
-            if entity_id in self.tracked_entities:
-                if connection in self.tracked_entities[entity_id]:
-                    self.tracked_entities[entity_id].remove(connection)
-                if not self.tracked_entities[entity_id]:
-                    del self.tracked_entities[entity_id]
-
-        connection.send_message(
-            {
-                "id": msg["id"],
-                "type": "result",
-                "success": True,
-                "message": f"Unsubscribed from entities: {entity_ids}",
-            }
-        )
+        """Drop the listener for this connection."""
+        _LOGGER.debug("WS unsubscribe: %s", msg)
+        self._drop_session(connection)
+        connection.send_message({
+            "id": msg["id"], "type": "result", "success": True,
+            "message": "Unsubscribed.",
+        })
 
     async def handle_known_points(
         self, hass: HomeAssistant, connection: ActiveConnection, msg: dict
     ):
+        """Compute a one-shot robust position from (x, y, r) tuples.
+
+        Kept for backwards compatibility, but the panel's preferred path
+        is the polling endpoint ``/api/bps/cords`` which already returns
+        the engine's Kalman-smoothed position with quality metrics.
+        Per-sample sigma is derived from the floor scale supplied by the
+        client (``scalePxPerM``) so soft-L1 outlier compression is
+        meaningful regardless of map density.
+        """
         try:
-            known_points = msg.get("knownPoints")  # Read knownPoints from the message
+            known_points = msg.get("knownPoints")
             if not known_points:
-                connection.send_message(
-                    {
-                        "id": msg["id"],
-                        "type": "tri_result",
-                        "success": False,
-                        "error": {
-                            "code": "invalid_request",
-                            "message": "No knownPoints provided.",
-                        },
-                    }
-                )
+                connection.send_message({
+                    "id": msg["id"], "type": "tri_result", "success": False,
+                    "error": {"code": "invalid_request", "message": "No knownPoints provided."},
+                })
                 return
 
-            # Perform trilateration
-            result = trilaterate(known_points)
+            scale_px_per_m = float(msg.get("scalePxPerM") or 0.0) or None
+            walls = msg.get("walls")
+            wall_penalty_m = float(msg.get("wallPenaltyM") or 0.0)
+            wall_penalty_px = max(0.0, wall_penalty_m * (scale_px_per_m or 1.0))
 
-            if result is None:
-                # If the result is None, return an error
-                connection.send_message(
-                    {
-                        "id": msg["id"],
-                        "type": "tri_result",
-                        "success": False,
-                        "error": {
-                            "code": "calculation_error",
-                            "message": "Trilateration failed.",
-                        },
-                    }
-                )
-                return
-
-            # Send back the result
-            connection.send_message(
-                {
-                    "id": msg["id"],
-                    "type": "tri_result",
-                    "success": True,
-                    "result": {"x": result[0], "y": result[1]},
-                }
+            result = trilaterate(
+                known_points,
+                walls=walls,
+                wall_penalty=wall_penalty_px,
+                scale_px_per_m=scale_px_per_m,
             )
+            if result is None:
+                connection.send_message({
+                    "id": msg["id"], "type": "tri_result", "success": False,
+                    "error": {"code": "calculation_error", "message": "Trilateration failed."},
+                })
+                return
+
+            connection.send_message({
+                "id": msg["id"], "type": "tri_result", "success": True,
+                "result": {"x": result[0], "y": result[1]},
+            })
 
         except Exception as e:
-            _LOGGER.error(f"Error processing knownPoints: {e}")
-            connection.send_message(
-                {
-                    "id": msg["id"],
-                    "type": "tri_result",
-                    "success": False,
-                    "error": {
-                        "code": "server_error",
-                        "message": str(e),
-                    },
-                }
-            )
-
-    async def state_change_listener(self, event):
-        """Listens for status changes and sends them to connections."""
-        entity_id = event.data.get("entity_id")
-        old_state = event.data.get("old_state")
-        new_state = event.data.get("new_state")
-
-        _LOGGER.debug(f"State change for {entity_id}: {old_state} -> {new_state}")
-
-        # Create the message to send to subscribing clients
-        message = {
-            "type": "state_changed",
-            "entity_id": entity_id,
-            "old_state": old_state.state if old_state else None,
-            "new_state": new_state.state if new_state else None,
-        }
-
-        # Send to all connected clients who are subscribed to this entity
-        for connection in self.tracked_entities.get(entity_id, []):
-            connection.send_message(message)
+            _LOGGER.error("Error processing knownPoints: %s", e)
+            connection.send_message({
+                "id": msg["id"], "type": "tri_result", "success": False,
+                "error": {"code": "server_error", "message": str(e)},
+            })
 
     def register(self):
         """Registers WebSocket commands"""
@@ -1729,10 +1928,13 @@ class BPSEntityWebSocket:
             known_points_wrapper,  # The wrapper handles async
             schema=vol.Schema(
                 {
-                    vol.Required("type"): "bps/known_points",  # Type for API
+                    vol.Required("type"): "bps/known_points",
                     vol.Required("knownPoints"): vol.All(
                         list, [vol.All([float, float, float])]
                     ),
+                    vol.Optional("scalePxPerM"): vol.Coerce(float),
+                    vol.Optional("wallPenaltyM"): vol.Coerce(float),
+                    vol.Optional("walls"): list,
                     vol.Optional("id"): int,
                 }
             ),
@@ -1741,17 +1943,25 @@ class BPSEntityWebSocket:
         _LOGGER.info("All WebSocket commands registered successfully.")
 
 
-def trilaterate(known_points, walls=None, wall_penalty: float = 0.0):
-    """Legacy adapter retained for the WebSocket `bps/known_points` API.
+def trilaterate(
+    known_points,
+    walls=None,
+    wall_penalty: float = 0.0,
+    scale_px_per_m: float | None = None,
+):
+    """Legacy adapter retained for the WebSocket ``bps/known_points`` API.
 
-    Forwards to the robust engine using a flat per-point sigma so callers
-    that lack noise estimates still benefit from soft-L1 outlier rejection,
-    1/r² seeding and HDOP-aware fitting.
+    Per-point sigma defaults to ``5%`` of the radius (in pixels) but
+    floored at ``2 px`` OR ``5 cm × scale``, whichever is larger. The
+    pixel floor was the previous hardcoded value; with a sub-cm map it
+    over-rejected legitimate noise. f_scale is set to roughly one meter
+    in the floor's pixel space when the caller provides ``scale_px_per_m``.
     """
     if len(known_points) < 3:
         _LOGGER.error("At least three known points are required for trilateration.")
         return None
 
+    sigma_floor = 2.0 if not scale_px_per_m else max(2.0, 0.05 * float(scale_px_per_m))
     samples = [
         DistanceSample(
             receiver_id=str(idx),
@@ -1760,14 +1970,16 @@ def trilaterate(known_points, walls=None, wall_penalty: float = 0.0):
             raw_distance_m=float(ri),
             distance_m=float(ri),
             radius_px=float(ri),
-            sigma_px=max(2.0, 0.05 * float(ri)),
+            sigma_px=max(sigma_floor, 0.05 * float(ri)),
         )
         for idx, (xi, yi, ri) in enumerate(known_points)
     ]
+    f_scale_px = max(2.0, float(scale_px_per_m)) if scale_px_per_m else None
     fit = trilaterate_robust(
         samples,
         walls=walls,
         wall_penalty_px=max(0.0, float(wall_penalty or 0.0)),
+        f_scale_px=f_scale_px,
     )
     if fit is None or not fit["converged"]:
         _LOGGER.error("Robust trilateration did not converge.")

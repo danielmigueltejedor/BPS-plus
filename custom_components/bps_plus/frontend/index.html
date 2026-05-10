@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>BPS+</title>
-    <link rel="stylesheet" href="bpsstyle.css?v=1.7.7">
+    <link rel="stylesheet" href="bpsstyle.css?v=2.0.0">
 </head>
 <body>
     <div class="container bg-gray-50">
@@ -141,6 +141,14 @@
                     </button>
                     <p id="calProStatus" class="text-sm text-gray-500">Pro: pendiente de marcar posición.</p>
                     <p id="calProCoverage" class="text-xs text-gray-500"></p>
+                    <div id="trackingQuality" class="text-xs text-gray-600 border-t pt-2 mt-2" style="display:none;">
+                        <p class="font-semibold mb-1">Calidad de seguimiento</p>
+                        <p id="trackingQualityLine" class="text-gray-500">—</p>
+                    </div>
+                    <div id="liveRssi" class="text-xs text-gray-600 border-t pt-2 mt-2" style="display:none;">
+                        <p class="font-semibold mb-1">RSSI por receptor (vivo)</p>
+                        <pre id="liveRssiBody" class="text-xs text-gray-500" style="white-space: pre-line; margin: 0;">—</pre>
+                    </div>
                     <p id="calStatus" class="text-sm text-gray-500">Sin muestras de calibración.</p>
                 </div>
             </div>
@@ -163,6 +171,6 @@
         </div>
     </div>
 
-    <script src="script.js?v=1.8.6"></script>
+    <script src="script.js?v=2.0.0"></script>
 </body>
 </html>

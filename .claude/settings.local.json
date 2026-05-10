@@ -14,7 +14,10 @@
       "Bash(python3 -m pytest tests/ -x --tb=short)",
       "Bash(python3 -m py_compile custom_components/bps_plus/__init__.py)",
       "Bash(python3 -m py_compile custom_components/bps_plus/sensor.py)",
-      "Bash(python3 -m py_compile custom_components/bps_plus/ble_scanner.py custom_components/bps_plus/__init__.py)"
+      "Bash(python3 -m py_compile custom_components/bps_plus/ble_scanner.py custom_components/bps_plus/__init__.py)",
+      "Bash(node -c custom_components/bps_plus/frontend/script.js)",
+      "Bash(echo \"--- exit: $?\")",
+      "Bash(python3 -m pytest tests/ -x --no-header -q)"
     ]
   }
 }
