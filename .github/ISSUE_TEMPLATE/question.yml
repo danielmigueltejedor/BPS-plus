@@ -1,0 +1,38 @@
+name: ❓ Question
+description: Ask for help with BPS+
+title: "[Question]: "
+labels: ["type: question", "status: needs triage"]
+assignees: []
+
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - Installation / HACS
+        - Configuration flow
+        - BLE scanning
+        - Positioning / trilateration
+        - Calibration
+        - Floor plan / zones
+        - Frontend / map
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: What have you tried?
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Home Assistant and BPS+ versions

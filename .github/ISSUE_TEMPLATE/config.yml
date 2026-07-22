@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: 💬 Discussions
+    url: https://github.com/danielmigueltejedor/BPS-plus/discussions
+    about: Ask setup questions and share BPS+ configurations.
+  - name: 📚 Documentation
+    url: https://github.com/danielmigueltejedor/BPS-plus#readme
+    about: Read the installation and configuration guide first.

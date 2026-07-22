@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Mantenimiento
+- Formularios guiados para bugs, mejoras y preguntas, con avisos para sanear datos privados.
+- Automatización de triaje, áreas, asignación, feedback, estados de release y cierre de incidencias inactivas.
+- Validaciones CI, HACS y Hassfest ampliadas y programadas.
+- Nueva guía de contribución con las comprobaciones locales del proyecto.
+
 ## [2.0.0] - 2026-05-10
 ### Cambios mayores: motor de posicionamiento robusto
 

@@ -1,0 +1,47 @@
+name: ✨ Feature request
+description: Suggest an improvement for BPS+
+title: "[Feature]: "
+labels: ["type: enhancement", "status: needs triage"]
+assignees: []
+
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - BLE scanning
+        - Positioning / trilateration
+        - Calibration
+        - Floor plan / zones
+        - Persons / beacons
+        - Frontend / map
+        - Configuration flow
+        - Installation / HACS
+        - Performance
+        - Security
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature description
+      description: What would you like BPS+ to support?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem it solves
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution or alternatives
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
