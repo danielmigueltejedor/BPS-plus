@@ -1,237 +1,171 @@
-# 📍 BLE Positioning System Plus (BPS+) for Home Assistant
+<div align="center">
+  <img src="./img/icon.png" alt="BPS+ logo" width="112">
+  <h1>BPS+ for Home Assistant</h1>
+  <p><strong>Indoor BLE positioning with floors, zones and a visual calibration workspace.</strong></p>
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=home-assistant)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Status](https://img.shields.io/badge/status-experimental-orange.svg)
-![GitHub](https://img.shields.io/badge/hosted%20on-GitHub-black?logo=github)
+  <p>
+    <a href="https://github.com/danielmigueltejedor/BPS-plus/releases"><img src="https://img.shields.io/github/v/release/danielmigueltejedor/BPS-plus?display_name=tag&sort=semver" alt="Latest release"></a>
+    <img src="https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=home-assistant&logoColor=white" alt="Home Assistant 2025.1 or newer">
+    <img src="https://img.shields.io/badge/HACS-custom%20repository-41BDF5" alt="HACS custom repository">
+    <img src="https://img.shields.io/badge/status-experimental-F59E0B" alt="Experimental status">
+    <a href="./LICENSE"><img src="https://img.shields.io/github/license/danielmigueltejedor/BPS-plus" alt="MIT license"></a>
+  </p>
 
-Integración **no oficial** para crear un sistema de **posicionamiento interior BLE** en **Home Assistant**.  
-Permite localizar dispositivos Bluetooth en el **plano de tu casa**, determinar **en qué planta** y **en qué zona** están, y usar esa información en automatizaciones inteligentes.
-
-> ⚠️ **Aviso sobre ARM / SciPy**  
-> Esta integración usa **NumPy / SciPy / Shapely**, que requieren compilación en ARM.  
-> En una **Raspberry Pi 5 con HAOS 64 bits** funciona correctamente.  
-> En ARM de 32 bits o hardware antiguo puede fallar la instalación.
-
-> 🟡 Proyecto no afiliado a Home Assistant, ni a los autores originales de BPS/Bermuda.  
-> Uso personal y educativo.
-
----
-
-## ✨ Características
-
-- Posicionamiento BLE mediante **trilateración** usando datos de `bluetooth_proxy`.
-- Distancias obtenidas inicialmente desde **Bermuda**.
-- Cálculo de:
-  - **Planta** del dispositivo.
-  - **Zona/habitación**.
-  - (Planificado) **Coordenadas X/Y** y calidad de señal.
-- Panel lateral para:
-  - Colocar receptores.
-  - Dibujar zonas.
-  - Dibujar paredes rectas y ajustar penalización por pared.
-  - Ver movimiento en tiempo real.
-- Arquitectura moderna:
-  - `config_flow`
-  - `DataUpdateCoordinator`
-  - Entidades estables con `unique_id`
-- **Objetivo futuro:** independencia total de Bermuda calculando distancias internamente a partir de RSSI.
+  <p>
+    <a href="#installation">Installation</a> ·
+    <a href="#configuration">Configuration</a> ·
+    <a href="#entities">Entities</a> ·
+    <a href="https://github.com/danielmigueltejedor/BPS-plus/issues">Support</a>
+  </p>
+</div>
 
 ---
 
-## 🧩 Instalación
+BPS+ is an unofficial Home Assistant integration for locating Bluetooth devices inside a building. It combines distance data from [Bermuda](https://github.com/agittins/bermuda), receiver placement and floor-plan geometry to expose useful floor and room information for dashboards and automations.
 
-### 🔹 Opción 1 — HACS (Recomendada)
+> [!IMPORTANT]
+> BPS+ is experimental. Positioning accuracy depends on receiver placement, radio interference, building materials and calibration. It should not be used for safety-critical presence detection.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=danielmigueltejedor&repository=BPS-plus&category=Integration)
+## Highlights
 
----
+| Capability | What it provides |
+|---|---|
+| Indoor positioning | BLE trilateration from multiple Home Assistant Bluetooth proxies |
+| Floors and zones | Floor and room-level states that can be used in automations |
+| Visual workspace | Place receivers, draw zones and walls, and inspect movement in real time |
+| Guided calibration | Manual calibration plus a multi-receiver Pro calibration workflow |
+| Wall compensation | Configurable signal penalties for different wall materials |
+| Home Assistant-native setup | Config flow, stable unique IDs and coordinator-based updates |
 
-### 🔹 Opción 2 — Instalación manual
+## Preview
 
-1. Descarga el repo:  
-   https://github.com/danielmigueltejedor/BPS-plus
-2. Copia los archivos en:
+<p align="center">
+  <img src="./img/screenshots/bps_tracking.gif" alt="BPS+ live BLE tracking" width="48%">
+  <img src="./img/screenshots/bps_setup.gif" alt="BPS+ visual setup workflow" width="48%">
+</p>
 
-```
-config/custom_components/bps_plus
-```
+<details>
+<summary><strong>More screenshots</strong></summary>
+<br>
+<p align="center">
+  <img src="./img/screenshots/panel.png" alt="BPS+ sidebar panel" width="48%">
+  <img src="./img/screenshots/entities.png" alt="BPS+ entities in Home Assistant" width="48%">
+</p>
+</details>
 
-3. Reinicia Home Assistant
+## Requirements
 
----
+- Home Assistant 2025.1 or newer
+- [Bermuda](https://github.com/agittins/bermuda) configured with usable distance entities
+- At least three well-positioned Bluetooth proxies for meaningful 2D positioning
+- A 64-bit installation is strongly recommended
 
-### 🔹 Opción 3 — Terminal SSH
+> [!WARNING]
+> BPS+ depends on NumPy, SciPy and Shapely. These packages may fail to install on 32-bit ARM systems or older hardware. Raspberry Pi 5 with 64-bit Home Assistant OS is known to work.
 
-```
-mkdir -p /config/custom_components
-rm -rf /config/custom_components/bps_plus
+## Installation
 
-cd /config
-git clone --depth=1 https://github.com/danielmigueltejedor/BPS-plus.git .bps-plus-tmp
-cp -r .bps-plus-tmp/custom_components/bps_plus /config/custom_components/
+### HACS custom repository
 
-rm -rf /config/.bps-plus-tmp
-```
+BPS+ is not currently listed in the default HACS catalogue. Add it once as a custom integration:
 
-Reinicia Home Assistant.
+1. Open **HACS → Integrations**.
+2. Open the three-dot menu and choose **Custom repositories**.
+3. Add `https://github.com/danielmigueltejedor/BPS-plus` with category **Integration**.
+4. Search for **BPS+**, select **Download**, and restart Home Assistant.
 
----
+[![Open BPS+ in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=danielmigueltejedor&repository=BPS-plus&category=Integration)
 
-## 🔄 Actualización
+### Manual installation
 
-```
-rm -rf /config/custom_components/bps_plus
-cd /config
-git clone --depth=1 https://github.com/danielmigueltejedor/BPS-plus.git .bps-plus-tmp
-cp -r .bps-plus-tmp/custom_components/bps_plus /config/custom_components/
-rm -rf /config/.bps-plus-tmp
-```
+1. Download the [latest release](https://github.com/danielmigueltejedor/BPS-plus/releases/latest).
+2. Copy `custom_components/bps_plus` to `/config/custom_components/bps_plus`.
+3. Restart Home Assistant.
 
-Reinicia Home Assistant.
+## Configuration
 
----
+1. Go to **Settings → Devices & services → Add integration**.
+2. Search for **BPS+**.
+3. Select the BLE devices discovered through Bermuda.
+4. Complete the setup and open the new BPS+ sidebar panel.
+5. Add your floor plan, place each receiver and define the relevant zones.
 
-## ⚙️ Configuración
+### Calibration
 
-1. **Ajustes → Dispositivos y servicios → Añadir integración**
-2. Buscar: **BPS+**
-3. Seleccionar dispositivos BLE detectados por Bermuda
-4. Ajustar parámetros internos
-5. Guardar
-6. Aparecerán entidades + panel lateral
+The sidebar workspace supports two calibration approaches:
 
-### Calibración amigable (sin JSON)
+- **Manual:** choose a receiver and tune its factor and offset.
+- **Pro mode:** mark your real position on the plan and run a 15-second calibration against all visible proxies. Repeat from additional positions when requested.
 
-En el panel lateral, sección **Calibración**:
+Save the floor plan after calibration so the updated values persist.
 
-1. Selecciona un `receiver` y define `factor` + `offset` para calibración manual.
-2. Para calibración automática: elige dispositivo, escribe metros reales medidos y pulsa **Capture** varias veces.
-3. Pulsa **Auto Calibrate** para calcular ajuste automáticamente.
-4. Guarda el plano para persistir cambios.
+### Wall compensation
 
-### Modo Pro (beta)
+Draw each wall with two points, then choose a per-floor signal penalty. The positioning engine applies that penalty whenever the estimated path to a receiver crosses a wall.
 
-- Botón para marcar tu posición real en el mapa (monigote).
-- Botón para quitar el monigote cuando quieras.
-- Autocalibración de 15 segundos sobre todos los proxies detectables desde esa posición.
-- Si faltan proxies por calibrar, la UI te indica a cuáles acercarte para repetir en otra posición.
+| Environment | Suggested starting value |
+|---|---:|
+| Open space | `0.8` |
+| Lightweight partition | `1.6` |
+| Standard interior wall | `2.5` |
+| Brick wall | `3.4` |
+| Concrete wall | `4.5` |
+| Wall with metal enclosure | `6.0` |
 
-### Precisión por paredes
+These are starting points, not universal measurements. Tune them against observations from your own installation.
 
-- Puedes dibujar paredes en el plano (2 clics por pared).
-- El motor de trilateración cuenta cuántas paredes cruza la línea entre posición estimada y cada proxy.
-- Se aplica una **penalización por pared** (en metros) configurable por planta para mejorar el ajuste cuando hay habitaciones separadas o cajas metálicas.
-- Incluye presets rápidos recomendados:
-  - Sin pared / abierto: `0.8`
-  - Tabique ligero: `1.6`
-  - Tabique estándar: `2.5`
-  - Ladrillo: `3.4`
-  - Muro/hormigón: `4.5`
-  - Muro + caja metálica: `6.0`
+## Entities
 
-### Detección automática BLE
+Entity IDs vary with the configured device name.
 
-- BPS+ detecta automáticamente dispositivos BLE y `bt proxy` desde entidades `_distance_to_`.
-- Para dispositivos con MAC privada rotativa, usa metadatos de Home Assistant (`source_type: bluetooth_le`, `current_address`, `source`, `friendly_name`) para mantener una identidad estable.
-- En la UI, el selector de dispositivos muestra nombre amigable cuando está disponible.
-- Al colocar receptores, el campo sugiere automáticamente proxies detectados.
+| Entity pattern | Description |
+|---|---|
+| `sensor.bps_<device>_floor` | Detected floor |
+| `sensor.bps_<device>_zone` | Detected room or zone |
+| `sensor.bps_<device>_distance_error` | Positioning error estimate |
+| `sensor.bps_<device>_last_update` | Last successful update |
+| `sensor.bps_<device>_x` | X coordinate — planned |
+| `sensor.bps_<device>_y` | Y coordinate — planned |
 
----
-
-## 📊 Entidades creadas
-
-| Entidad | Descripción |
-|--------|-------------|
-| `sensor.bps_<device>_floor` | Planta detectada |
-| `sensor.bps_<device>_zone` | Zona/habitación |
-| `sensor.bps_<device>_x` *(planificado)* | Coordenada X |
-| `sensor.bps_<device>_y` *(planificado)* | Coordenada Y |
-| `sensor.bps_<device>_distance_error` | Error del cálculo |
-| `sensor.bps_<device>_last_update` | Última actualización |
-
----
-
-## 🎯 Automatizaciones de ejemplo
-
-### Encender luz al entrar en la cocina
+### Automation example
 
 ```yaml
-trigger:
-  - platform: state
-    entity_id: sensor.bps_apple_watch_daniel_zone
-    to: "Cocina"
-action:
-  - service: light.turn_on
-    target:
-      entity_id: light.cocina
+automation:
+  - alias: Turn on the kitchen light when the tracked device enters
+    triggers:
+      - trigger: state
+        entity_id: sensor.bps_phone_zone
+        to: Kitchen
+    actions:
+      - action: light.turn_on
+        target:
+          entity_id: light.kitchen
 ```
 
-### Luz suave si alguien sube a planta 1 por la noche
+## How it works
 
-```yaml
-trigger:
-  - platform: state
-    entity_id: sensor.bps_padre_floor
-    to: "1"
-condition:
-  - condition: sun
-    after: sunset
-action:
-  - service: light.turn_on
-    data:
-      brightness: 20
-    target:
-      entity_id: light.pasillo_1
-```
+1. Bermuda supplies distance estimates for tracked BLE devices.
+2. BPS+ matches those measurements with the receiver positions on the floor plan.
+3. SciPy minimizes the positioning error; Shapely resolves the resulting point against the configured geometry.
+4. Home Assistant receives the calculated floor, zone and diagnostic states.
 
----
+BPS+ also uses Home Assistant Bluetooth metadata to keep a stable identity where devices rotate private MAC addresses.
 
-## 🧠 Detalles técnicos
+## Support and development
 
-- **Distancias:** proporcionadas por Bermuda  
-- **Cálculo:** trilateración con SciPy, ajuste y minimización de error  
-- **Zonas:** detección por geometría (Shapely)  
-- **Coordenadas:** sistema interno normalizado  
-- **Roadmap:**
-  - Sustituir Bermuda por cálculo propio desde RSSI
-  - Soporte para zonas poligonales
-  - Tarjeta Lovelace de seguimiento
-  - Exportar datos históricos de movimiento
+- Read the [changelog](./CHANGELOG.md) before updating.
+- Search [existing issues](https://github.com/danielmigueltejedor/BPS-plus/issues) before opening a new one.
+- Include the Home Assistant version, BPS+ version, hardware architecture and sanitized diagnostics with bug reports.
+- Never publish Bluetooth addresses or other sensitive household data without redacting them.
 
----
+## Credits and license
 
-## 🧑‍💻 Autor
+BPS+ is based on [Hogster/BPS](https://github.com/Hogster/BPS) and uses distance data from [Bermuda](https://github.com/agittins/bermuda). It is released under the [MIT License](./LICENSE).
 
-- **[@danielmigueltejedor](https://github.com/danielmigueltejedor)**  
-- Repositorio: https://github.com/danielmigueltejedor/BPS-plus  
-- Licencia: MIT  
-- Versión: 2.0.0
+This project is not affiliated with or endorsed by Home Assistant, BPS or Bermuda.
 
----
-
-## ⚠️ Créditos y legal
-
-Basado en:
-
-- **Hogster/BPS**
-- **agittins/Bermuda**
-
-Proyecto no afiliado a Home Assistant.
-
-La precisión depende de la posición de los bluetooth_proxy, interferencias y estructura de la vivienda.
-
-## Licencia
-
-BPS+ es un fork del proyecto [BPS](https://github.com/Hogster/BPS) de Hogster, 
-licenciado bajo MIT.  
-Las modificaciones y extensiones de BPS+ están también bajo licencia MIT.
-
----
-
-## 💰 Donaciones
-
-Si te gusta este proyecto y quieres apoyar su desarrollo, considera hacer una donación:
-
-[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/DanielMiguelTejedor)
+<div align="center">
+  <sub>Created and maintained by <a href="https://github.com/danielmigueltejedor">Daniel Miguel Tejedor</a>.</sub>
+  <br><br>
+  <a href="https://paypal.me/DanielMiguelTejedor"><img src="https://img.shields.io/badge/Support%20the%20project-PayPal-0070BA?logo=paypal&logoColor=white" alt="Support the project with PayPal"></a>
+</div>
