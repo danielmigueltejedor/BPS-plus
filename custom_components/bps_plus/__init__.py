@@ -26,6 +26,7 @@ from homeassistant.components.websocket_api import (
 )
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from shapely.geometry import Point, Polygon
 import voluptuous as vol
@@ -62,6 +63,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 

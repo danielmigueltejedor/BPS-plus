@@ -3,7 +3,7 @@
   "name": "BPS+ (BLE Positioning System +)",
   "codeowners": ["@danielmigueltejedor"],
   "config_flow": true,
-  "dependencies": ["http"],
+  "dependencies": ["bluetooth", "http"],
   "documentation": "https://github.com/danielmigueltejedor/BPS-plus",
   "integration_type": "device",
   "iot_class": "calculated",
