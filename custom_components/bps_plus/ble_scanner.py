@@ -44,9 +44,10 @@ MAX_FIT_SAMPLES = 60
 # Time-weighted EWMA constant (seconds). Burst arrivals after a long
 # silence weight as if the inter-arrival time were ~RSSI_TAU, not zero.
 RSSI_TAU = 1.5
-# Drop devices and links unseen for this many seconds. Bounds memory
-# growth when transient devices fly through the BLE field (neighbours,
-# delivery riders, AirTags from passers-by, ...).
+# Drop devices, links, and scanners unseen for this many seconds. Bounds
+# memory growth when transient devices fly through the BLE field
+# (neighbours, delivery riders, AirTags from passers-by, ...) and when
+# proxies are powered off or removed.
 DEVICE_PRUNE_AFTER = 60 * 30.0   # 30 min
 
 
@@ -189,28 +190,53 @@ class BleScanner:
             self._unsub = None
 
     def prune_stale(self, now: float | None = None) -> int:
-        """Drop devices and links unseen for `DEVICE_PRUNE_AFTER` seconds.
+        """Drop devices, links, aliases, and scanners unseen for
+        `DEVICE_PRUNE_AFTER` seconds.
 
-        Returns count of dropped device entries. Calibration samples
-        belonging to live links are kept across rotations via
-        `set_alias`, so pruning is safe.
+        Returns the count of dropped device entries. Calibration samples
+        on links are kept when only the scanner entry is stale, so a
+        proxy that comes back keeps its path-loss fit. `set_alias`
+        likewise preserves samples across MAC rotations.
+
+        Name and receiver-resolution caches for removed sources are
+        cleared so a dead proxy cannot keep winning `resolve_receiver`.
         """
         cutoff = (now if now is not None else time.monotonic()) - DEVICE_PRUNE_AFTER
         dead_devices = [
             ident for ident, meta in self.devices.items()
             if meta.last_seen < cutoff
         ]
-        if not dead_devices:
-            return 0
-        dead_set = set(dead_devices)
-        for ident in dead_devices:
-            self.devices.pop(ident, None)
-        # Drop any link whose target is gone.
-        for key in [k for k in list(self.links) if k[0] in dead_set]:
-            self.links.pop(key, None)
-        # Drop alias entries whose target identity is gone.
-        for mac in [m for m, ident in list(self._aliases.items()) if ident in dead_set]:
-            self._aliases.pop(mac, None)
+        if dead_devices:
+            dead_set = set(dead_devices)
+            for ident in dead_devices:
+                self.devices.pop(ident, None)
+            # Drop any link whose target is gone.
+            for key in [k for k in list(self.links) if k[0] in dead_set]:
+                self.links.pop(key, None)
+            # Drop alias entries whose target identity is gone.
+            for mac in [m for m, ident in list(self._aliases.items()) if ident in dead_set]:
+                self._aliases.pop(mac, None)
+
+        # Scanners used to be insert-only: a proxy seen once stayed in
+        # `self.scanners` until HA restarted, so the scanners API and
+        # `resolve_receiver` kept reporting it after it was powered off.
+        # Age them out on the same cutoff as devices. Do this even when
+        # no device is stale — a quiet house can still have a dead proxy.
+        dead_scanners = [
+            source for source, meta in self.scanners.items()
+            if meta.last_seen < cutoff
+        ]
+        if dead_scanners:
+            dead_sources = set(dead_scanners)
+            for source in dead_scanners:
+                self.scanners.pop(source, None)
+                self._name_cache.pop(source, None)
+            for rid in [
+                rid for rid, resolved in list(self._receiver_resolution.items())
+                if resolved in dead_sources
+            ]:
+                self._receiver_resolution.pop(rid, None)
+            _LOGGER.debug("Dropped %d stale scanners", len(dead_scanners))
         return len(dead_devices)
 
     # -- Advertisement handling --------------------------------------------
@@ -477,9 +503,18 @@ class BleScanner:
             key=lambda m: (m.name or m.address).lower(),
         )
 
-    def known_scanners(self) -> list[ScannerMeta]:
+    def known_scanners(self, max_age: float = STALE_AFTER) -> list[ScannerMeta]:
+        """Proxies heard within `max_age` seconds.
+
+        The dict itself keeps a scanner until `prune_stale` (so
+        `resolve_receiver` can still name a proxy during the sensor
+        sticky window). Callers that list what the engine currently
+        sees — the scanners API, discovery — use this filter, matching
+        `known_devices`.
+        """
+        now = time.monotonic()
         return sorted(
-            self.scanners.values(),
+            (s for s in self.scanners.values() if now - s.last_seen < max_age),
             key=lambda s: (s.name or s.source).lower(),
         )
 
