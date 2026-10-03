@@ -616,7 +616,7 @@ _engine_state: dict[str, dict] = {}
 
 def _prune_engine_state(scanner, now_mono: float) -> None:
     """Drop per-target engine state for devices long idle and prune the
-    scanner's own device/link dicts in lock-step. Bounds memory when
+    scanner's own device/link/scanner dicts in lock-step. Bounds memory when
     private_ble_device aliases churn or transient devices fly through.
     """
     try:
@@ -625,6 +625,8 @@ def _prune_engine_state(scanner, now_mono: float) -> None:
             _LOGGER.debug("Scanner dropped %d stale devices", dropped_dev)
     except Exception as err:  # pragma: no cover - defensive
         _LOGGER.debug("Scanner prune failed: %s", err)
+
+    _drop_resolved_sources_for_missing_scanners(scanner)
 
     if not _engine_state:
         return
@@ -641,6 +643,31 @@ def _prune_engine_state(scanner, now_mono: float) -> None:
     for ent in stale:
         _engine_state.pop(ent, None)
     _LOGGER.debug("Pruned %d stale engine entries", len(stale))
+
+
+def _drop_resolved_sources_for_missing_scanners(scanner) -> None:
+    """Forget receiver→source cache entries whose scanner was pruned.
+
+    `_build_floor_buckets` keeps the first successful `resolve_receiver`
+    hit for the life of the engine entry. A proxy removed from
+    `scanner.scanners` would otherwise keep winning that cache.
+    """
+    if not _engine_state:
+        return
+    live = scanner.scanners
+    dropped = 0
+    for state in _engine_state.values():
+        cached = state.get("receiver_sources")
+        if not cached:
+            continue
+        stale = [rid for rid, src in cached.items() if src not in live]
+        for rid in stale:
+            cached.pop(rid, None)
+        dropped += len(stale)
+    if dropped:
+        _LOGGER.debug(
+            "Dropped %d receiver resolutions for pruned scanners", dropped,
+        )
 
 
 def _resolve_target_identity_lazy(entity_token: str) -> str:
